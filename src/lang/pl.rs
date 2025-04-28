@@ -681,5 +681,12 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("remote-printing-disallowed-text-tip", "Ustawienia uprawnień po zdalnej stronie uniemożliwiają zdalne drukowanie."),
         ("save-settings-tip", "Zapisz ustawienia"),
         ("dont-show-again-tip", "Nie pokazuj więcej"),
+        ("Enable remote printer", ""),
+        ("Downloading {}", ""),
+        ("{} Update", ""),
+        ("{}-to-update-tip", ""),
+        ("download-new-version-failed-tip", ""),
+        ("Auto update", ""),
+        ("update-failed-check-msi-tip", ""),
     ].iter().cloned().collect();
 }
