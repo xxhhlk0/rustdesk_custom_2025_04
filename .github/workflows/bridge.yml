@@ -4,29 +4,57 @@ name: Build flutter-rust-bridge
 
 on:
   workflow_call:
+    secrets:
+      PLS_LET_ME_IN:
+        required: true
+      CUSTOM_RENDEZVOUS_SERVERS:
+        required: false
+      CUSTOM_RS_PUB_KEY:
+        required: false
+      CUSTOM_RENDEZVOUS_PORT:
+        required: false
+      CUSTOM_RELAY_PORT:
+        required: false
+      CUSTOM_WS_RENDEZVOUS_PORT:
+        required: false
+      CUSTOM_WS_RELAY_PORT:
+        required: false
 
 env:
   CARGO_EXPAND_VERSION: "1.0.95"
   FLUTTER_VERSION: "3.22.3"
   FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
   RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503
+  # Custom config (optional, will use upstream defaults if not set)
+  CUSTOM_RENDEZVOUS_SERVERS: "${{ secrets.CUSTOM_RENDEZVOUS_SERVERS }}"
+  CUSTOM_RS_PUB_KEY: "${{ secrets.CUSTOM_RS_PUB_KEY }}"
+  CUSTOM_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_RENDEZVOUS_PORT }}"
+  CUSTOM_RELAY_PORT: "${{ secrets.CUSTOM_RELAY_PORT }}"
+  CUSTOM_WS_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_WS_RENDEZVOUS_PORT }}"
+  CUSTOM_WS_RELAY_PORT: "${{ secrets.CUSTOM_WS_RELAY_PORT }}"
 
 jobs:
   generate_bridge:
-    runs-on: ${{ matrix.job.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        job:
-          - {
-              target: x86_64-unknown-linux-gnu,
-              os: ubuntu-22.04,
-              extra-build-args: "",
-            }
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            extra-build-args: ""
     steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.PLS_LET_ME_IN }}
           submodules: recursive
 
       - name: Install prerequisites
@@ -40,9 +68,9 @@ jobs:
             gcc \
             git \
             g++ \
-            libclang-dev \
+            libclang-11-dev \
             libgtk-3-dev \
-            llvm-dev \
+            llvm-11-dev \
             nasm \
             ninja-build \
             pkg-config \

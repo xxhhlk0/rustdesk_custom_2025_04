@@ -5,24 +5,31 @@ env:
 #   CICD_INTERMEDIATES_DIR: "_cicd-intermediates"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   # for multiarch gcc compatibility
-  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
+  # Custom config (optional, will use upstream defaults if not set)
+  CUSTOM_RENDEZVOUS_SERVERS: "${{ secrets.CUSTOM_RENDEZVOUS_SERVERS }}"
+  CUSTOM_RS_PUB_KEY: "${{ secrets.CUSTOM_RS_PUB_KEY }}"
+  CUSTOM_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_RENDEZVOUS_PORT }}"
+  CUSTOM_RELAY_PORT: "${{ secrets.CUSTOM_RELAY_PORT }}"
+  CUSTOM_WS_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_WS_RENDEZVOUS_PORT }}"
+  CUSTOM_WS_RELAY_PORT: "${{ secrets.CUSTOM_WS_RELAY_PORT }}"
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "README.md"
-  push:
-    branches:
-      - master
-    paths-ignore:
-      - ".github/**"
-      - "docs/**"
-      - "README.md"
-      - "res/**"
-      - "appimage/**"
-      - "flatpak/**"
+  #pull_request:
+  #  paths-ignore:
+  #    - "docs/**"
+  #    - "README.md"
+  #push:
+  #  branches:
+  #    - master
+  #  paths-ignore:
+  #    - ".github/**"
+  #    - "docs/**"
+  #    - "README.md"
+  #    - "res/**"
+  #    - "appimage/**"
+  #    - "flatpak/**"
 
 jobs:
   # ensure_cargo_fmt:
@@ -81,23 +88,9 @@ jobs:
           # - { target: x86_64-apple-darwin         , os: macos-10.15                   }
           # - { target: x86_64-pc-windows-gnu       , os: windows-2022                  }
           # - { target: x86_64-pc-windows-msvc      , os: windows-2022                  }
-          - { target: x86_64-unknown-linux-gnu    , os: ubuntu-24.04                  }
+          - { target: x86_64-unknown-linux-gnu    , os: ubuntu-22.04                  }
           # - { target: x86_64-unknown-linux-musl   , os: ubuntu-20.04, use-cross: true }
     steps:
-    - name: Free Disk Space (Ubuntu)
-      if: runner.os == 'Linux'
-      # jlumbroso/free-disk-space@main is used in .github\workflows\flutter-build.yml
-      # But pinning to a specific version to avoid unexpected issues is preferred.
-      uses: jlumbroso/free-disk-space@v1.3.1
-      with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: false
-        docker-images: true
-        swap-storage: false
-
     - name: Export GitHub Actions cache environment variables
       uses: actions/github-script@v6
       with:
@@ -108,6 +101,7 @@ jobs:
     - name: Checkout source code
       uses: actions/checkout@v4
       with:
+        token: ${{ secrets.PLS_LET_ME_IN }}
         submodules: recursive
 
     - name: Install prerequisites
