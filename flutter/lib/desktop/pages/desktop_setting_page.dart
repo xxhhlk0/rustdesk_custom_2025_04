@@ -1804,6 +1804,7 @@ class _DisplayState extends State<_Display> {
       scrollStyle(context),
       imageQuality(context),
       codec(context),
+      hwEncodeProfile(context),
       if (isDesktop) trackpadSpeed(context),
       if (!isWeb) privacyModeImpl(context),
       other(context),
@@ -1990,6 +1991,271 @@ class _DisplayState extends State<_Display> {
           label: 'AV1',
           onChanged: isOptFixed ? null : onChanged),
       ...hwRadios,
+    ]);
+  }
+
+  // ===== 硬件编码参数 profile (主机侧编码, 对新会话生效) =====
+  bool? _hwCustomLoaded;
+  final _customPresetCtrl = TextEditingController();
+  final _customRcCtrl = TextEditingController();
+  final _customKbsCtrl = TextEditingController();
+  final _customQCtrl = TextEditingController();
+  final _customFpsCtrl = TextEditingController();
+  final _customGopCtrl = TextEditingController();
+  bool _customAdaptive = true;
+  final _hwPeerIdCtrl = TextEditingController();
+  String _hwPeerProfile = 'latency';
+
+  @override
+  void dispose() {
+    _customPresetCtrl.dispose();
+    _customRcCtrl.dispose();
+    _customKbsCtrl.dispose();
+    _customQCtrl.dispose();
+    _customFpsCtrl.dispose();
+    _customGopCtrl.dispose();
+    _hwPeerIdCtrl.dispose();
+    super.dispose();
+  }
+
+  String _hwSelected() {
+    final v = bind.mainGetOption(key: kOptionHwEncodeProfile);
+    if (v.startsWith('{')) return 'custom';
+    if (v.isEmpty) return 'balanced';
+    return v;
+  }
+
+  void _loadCustomFields() {
+    if (_hwCustomLoaded != null) return;
+    _hwCustomLoaded = true;
+    final v = bind.mainGetOption(key: kOptionHwEncodeProfile);
+    if (v.startsWith('{')) {
+      try {
+        final map = jsonDecode(v) as Map<String, dynamic>;
+        String s(dynamic x) => x == null ? '' : '$x';
+        _customPresetCtrl.text = s(map['preset']);
+        _customRcCtrl.text = s(map['rc']);
+        _customKbsCtrl.text = s(map['kbs']);
+        _customQCtrl.text = s(map['q']);
+        _customFpsCtrl.text = s(map['fps']);
+        _customGopCtrl.text = s(map['gop']);
+        _customAdaptive = map['bitrate_adaptive'] != false;
+      } catch (e) {
+        debugPrint('failed to parse hw-encode-profile: $e');
+      }
+    }
+  }
+
+  void _saveHwProfile(String v) {
+    bind.mainSetOption(key: kOptionHwEncodeProfile, value: v);
+    setState(() {});
+  }
+
+  int? _hwParseInt(String t) => t.trim().isEmpty ? null : int.tryParse(t.trim());
+
+  void _saveCustomProfile() {
+    bind.mainSetOption(key: kOptionHwEncodeProfile, value: _customProfileJson());
+  }
+
+  String _customProfileJson() {
+    final map = <String, dynamic>{
+      'id': 'custom',
+      'preset': _hwParseInt(_customPresetCtrl.text),
+      'rc': _hwParseInt(_customRcCtrl.text),
+      'kbs': _hwParseInt(_customKbsCtrl.text),
+      'q': _hwParseInt(_customQCtrl.text),
+      'fps': _hwParseInt(_customFpsCtrl.text),
+      'gop': _hwParseInt(_customGopCtrl.text),
+      'bitrate_adaptive': _customAdaptive,
+    };
+    return jsonEncode(map);
+  }
+
+  List<String> _hwOverridePeers() {
+    final v = bind.mainGetOption(key: kOptionHwEncodeProfilePeers);
+    return v.split(',').where((e) => e.trim().isNotEmpty).map((e) => e.trim()).toList();
+  }
+
+  void _savePeerOverride() {
+    final pid = _hwPeerIdCtrl.text.trim();
+    if (pid.isEmpty) return;
+    final v = _hwPeerProfile == 'custom'
+        ? _customProfileJson()
+        : _hwPeerProfile;
+    if (v.isEmpty) return;
+    bind.mainSetPeerOption(id: pid, key: kOptionHwEncodeProfile, value: v);
+    final peers = _hwOverridePeers();
+    if (!peers.contains(pid)) {
+      peers.add(pid);
+      bind.mainSetOption(key: kOptionHwEncodeProfilePeers, value: peers.join(','));
+    }
+    setState(() {});
+  }
+
+  void _removePeerOverride(String pid) {
+    bind.mainSetPeerOption(id: pid, key: kOptionHwEncodeProfile, value: '');
+    final peers = _hwOverridePeers()..remove(pid);
+    bind.mainSetOption(key: kOptionHwEncodeProfilePeers, value: peers.join(','));
+    setState(() {});
+  }
+
+  String _hwPeerLabel(String v) {
+    if (v.isEmpty) return '';
+    if (v.startsWith('{')) return translate('Custom');
+    return v;
+  }
+
+  Widget _hwField(String label, TextEditingController c,
+      {bool number = false, String hint = ''}) {
+    return Row(
+      children: [
+        SizedBox(
+            width: 120,
+            child: Text(translate(label),
+                style: const TextStyle(fontSize: 13))),
+        Expanded(
+          child: TextField(
+            controller: c,
+            keyboardType: number ? TextInputType.number : TextInputType.text,
+            decoration: InputDecoration(hintText: translate(hint)),
+            onChanged: (_) => _saveCustomProfile(),
+          ),
+        ),
+      ],
+    ).marginOnly(bottom: 6);
+  }
+
+  Widget _hwDropdown(String label, String value, Map<String, String> items,
+      void Function(String) onChanged) {
+    return Row(
+      children: [
+        SizedBox(
+            width: 120,
+            child: Text(translate(label), style: const TextStyle(fontSize: 13))),
+        Expanded(
+          child: DropdownButton<String>(
+            isExpanded: true,
+            value: value,
+            items: items.entries
+                .map((e) => DropdownMenuItem<String>(value: e.key, child: Text(translate(e.value))))
+                .toList(),
+            onChanged: (v) {
+              if (v != null) onChanged(v);
+            },
+          ),
+        ),
+      ],
+    ).marginOnly(bottom: 6);
+  }
+
+  Widget hwEncodeProfile(BuildContext context) {
+    if (!(bind.mainHasHwcodec() || bind.mainHasVram())) {
+      return Offstage();
+    }
+    _loadCustomFields();
+    final sel = _hwSelected();
+    final isCustom = sel == 'custom';
+    final peers = _hwOverridePeers();
+    return _Card(title: 'Hardware Encode Profile', children: [
+      Text(
+        translate('Applied by the controlled side at the next session. Per-client override takes effect when that client connects.'),
+        style: const TextStyle(fontSize: 12, color: Colors.grey),
+      ).marginOnly(bottom: 8),
+      _Radio(context,
+          value: 'latency',
+          groupValue: sel,
+          label: 'Low latency (preset p1, CBR)',
+          onChanged: (v) => _saveHwProfile(v)),
+      _Radio(context,
+          value: 'balanced',
+          groupValue: sel,
+          label: 'Balanced (default)',
+          onChanged: (v) => _saveHwProfile(v)),
+      _Radio(context,
+          value: 'quality',
+          groupValue: sel,
+          label: 'Quality first (preset p4, VBR)',
+          onChanged: (v) => _saveHwProfile(v)),
+      _Radio(context,
+          value: 'custom',
+          groupValue: sel,
+          label: 'Custom',
+          onChanged: (v) => _saveHwProfile(v)),
+      if (isCustom)
+        Column(children: [
+          Divider(),
+          _hwDropdown('Encoder preset', _customPresetCtrl.text.isEmpty ? '0' : _customPresetCtrl.text, {
+            '0': 'Default',
+            '1': 'High',
+            '2': 'Medium',
+            '3': 'Low',
+          }, (v) {
+            _customPresetCtrl.text = v;
+            _saveCustomProfile();
+            setState(() {});
+          }),
+          _hwDropdown('Rate control', _customRcCtrl.text.isEmpty ? '0' : _customRcCtrl.text, {
+            '0': 'Default (CBR)',
+            '1': 'CBR',
+            '2': 'VBR',
+            '3': 'CQ (mediacodec only)',
+          }, (v) {
+            _customRcCtrl.text = v;
+            _saveCustomProfile();
+            setState(() {});
+          }),
+          _hwField('Bitrate (kbps)', _customKbsCtrl, number: true, hint: 'Auto if empty'),
+          _hwField('QP (0-51, CQ only)', _customQCtrl, number: true, hint: 'Auto if empty'),
+          _hwField('FPS', _customFpsCtrl, number: true, hint: '30 if empty'),
+          _hwField('GOP', _customGopCtrl, number: true, hint: 'Default if empty'),
+          CheckboxListTile(
+              dense: true,
+              title: Text(translate('Allow adaptive bitrate (VideoQoS)')),
+              value: _customAdaptive,
+              onChanged: (v) {
+                _customAdaptive = v ?? true;
+                _saveCustomProfile();
+                setState(() {});
+              }),
+          Text(
+            translate('Note: VRAM channel only supports bitrate/fps/gop; preset and rate control only apply to the RAM hardware codec path.'),
+            style: const TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+        ]).marginOnly(left: 12),
+      Divider(),
+      Text(translate('Per-client override'),
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500))
+          .marginOnly(bottom: 6),
+      ...peers.map((pid) {
+        final v = bind.mainGetPeerOption(id: pid, key: kOptionHwEncodeProfile);
+        return Row(children: [
+          Expanded(child: Text(pid, style: const TextStyle(fontSize: 13))),
+          Text(_hwPeerLabel(v), style: const TextStyle(fontSize: 13, color: Colors.grey)),
+          IconButton(
+              icon: const Icon(Icons.delete_outline, size: 20),
+              onPressed: () => _removePeerOverride(pid)),
+        ]);
+      }),
+      Row(children: [
+        Expanded(
+          child: TextField(
+            controller: _hwPeerIdCtrl,
+            decoration: InputDecoration(
+                hintText: translate('Peer ID'), isDense: true),
+          ),
+        ),
+        SizedBox(width: 8),
+        DropdownButton<String>(
+          value: _hwPeerProfile,
+          items: ['latency', 'balanced', 'quality', 'custom']
+              .map((e) => DropdownMenuItem<String>(value: e, child: Text(translate(e))))
+              .toList(),
+          onChanged: (v) {
+            if (v != null) setState(() => _hwPeerProfile = v);
+          },
+        ),
+        TextButton(onPressed: _savePeerOverride, child: Text(translate('Save'))),
+      ]),
     ]);
   }
 
