@@ -2,13 +2,6 @@ name: Build the flutter version of the RustDesk
 
 on:
   workflow_call:
-    inputs:
-      upload-artifact:
-        type: boolean
-        default: true
-      upload-tag:
-        type: string
-        default: "nightly"
 
 # NOTE: F-Droid builder script 'flutter/build_fdroid.sh' reads environment
 # variables from this workflow!
@@ -34,30 +27,40 @@ env:
   FLUTTER_WINDOWS_ARM_VERSION: "3.44.0"
   # for arm64 linux because official Dart SDK does not work
   FLUTTER_ELINUX_VERSION: "3.16.9"
-  TAG_NAME: "${{ inputs.upload-tag }}"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   # vcpkg version: 2025.08.27
   # If we change the `VCPKG COMMIT_ID`, please remember:
   # 1. Call `$VCPKG_ROOT/vcpkg x-update-baseline` to update the baseline in `vcpkg.json`.
-  #  Or we may face build issue like 
+  #  Or we may face build issue like
   #  https://github.com/rustdesk/rustdesk/actions/runs/14414119794/job/40427970174
   # 2. Update the `VCPKG_COMMIT_ID` in `ci.yml` and `playground.yml`.
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836" # 2025.01.13, got "/opt/artifacts/vcpkg/vcpkg: No such file or directory" with latest version
   VERSION: "1.4.9"
   NDK_VERSION: "r28c"
+  # AWS CLI retry configuration for R2 operations
+  AWS_MAX_ATTEMPTS: "5"
+  AWS_RETRY_MODE: "standard"
   #signing keys env variable checks
   ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
-  UPLOAD_ARTIFACT: "${{ inputs.upload-artifact }}"
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}-2"
+  # Custom server configuration (embedded at build time)
+  CUSTOM_RENDEZVOUS_SERVER: "${{ secrets.CUSTOM_RENDEZVOUS_SERVER }}"
+  CUSTOM_RS_PUB_KEY: "${{ secrets.CUSTOM_RS_PUB_KEY }}"
+  CUSTOM_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_RENDEZVOUS_PORT }}"
+  CUSTOM_RELAY_PORT: "${{ secrets.CUSTOM_RELAY_PORT }}"
+  CUSTOM_WS_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_WS_RENDEZVOUS_PORT }}"
+  CUSTOM_WS_RELAY_PORT: "${{ secrets.CUSTOM_WS_RELAY_PORT }}"
 
 jobs:
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
+    secrets: inherit
 
   build-RustDeskTempTopMostWindow:
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    secrets: inherit
     strategy:
       fail-fast: false
       matrix:
@@ -118,14 +121,20 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Restore bridge files
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          # arm64 is on Flutter 3.44, so it needs the bridge generated with the same Flutter
-          # (its *.freezed.dart must match the freezed the arm64 build resolves). x64 and every
-          # other platform keep the default 3.22.3-generated bridge.
-          name: ${{ matrix.job.arch == 'aarch64' && 'bridge-artifact-flutter-3.44' || 'bridge-artifact' }}
-          path: ./
+      - name: Restore bridge files from R2
+        shell: bash
+        run: |
+          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/${{ matrix.job.arch == 'aarch64' && 'bridge-artifact-flutter-3.44' || 'bridge-artifact' }}/ ./src/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          mv ./src/generated_bridge.dart ./flutter/lib/
+          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
+          mv ./src/bridge_generated.h ./flutter/macos/Runner/
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
@@ -184,7 +193,12 @@ jobs:
         run: |
           flutter doctor -v
           flutter precache --windows
-          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          $engineZipTmp = Join-Path $PWD ([System.IO.Path]::GetRandomFileName() + ".zip")
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile $engineZipTmp
+          Move-Item -Force $engineZipTmp windows-x64-release.zip
+
+      - name: Install custom flutter engine
+        run: |
           Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
           mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
 
@@ -227,6 +241,7 @@ jobs:
       - name: Install vcpkg dependencies
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
+          USE_AOM_391: 1
         run: |
           if ! $VCPKG_ROOT/vcpkg \
             install \
@@ -258,19 +273,44 @@ jobs:
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec ${{ matrix.job.build-args }}
           mv ./flutter/build/windows/${{ matrix.job.flutter-arch }}/runner/Release ./rustdesk
 
-          # Download usbmmidd_v2.zip and extract it to ./rustdesk
-          Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+      - name: Download usbmmidd_v2 with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            $tmpZip = Join-Path $PWD.Path ("usbmmidd_v2.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpZip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
+            Move-Item -Force $tmpZip .\usbmmidd_v2.zip
+
+      - name: Extract usbmmidd_v2
+        run: |
           Expand-Archive usbmmidd_v2.zip -DestinationPath .
           Remove-Item -Path usbmmidd_v2\Win32 -Recurse
           Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
           mv -Force .\usbmmidd_v2 ./rustdesk
 
-          # Download printer driver files and extract them to ./rustdesk
-          try {
-            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
-            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
-            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/sha256sums -OutFile sha256sums
+      - name: Download printer driver files with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            $tmpDriver = Join-Path $PWD.Path ("rustdesk_printer_driver_v4-1.4.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            $tmpAdapter = Join-Path $PWD.Path ("printer_driver_adapter.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            $tmpChecksums = Join-Path $PWD.Path ("sha256sums.{0}" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpDriver https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpAdapter https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpChecksums https://github.com/rustdesk/hbb_common/releases/download/driver/sha256sums
+            Move-Item -Force $tmpDriver rustdesk_printer_driver_v4-1.4.zip
+            Move-Item -Force $tmpAdapter printer_driver_adapter.zip
+            Move-Item -Force $tmpChecksums sha256sums
 
+      - name: Install printer driver files
+        run: |
+          try {
             # Check and move the files
             $checksum_driver = (Select-String -Path .\sha256sums -Pattern '^([a-fA-F0-9]{64}) \*rustdesk_printer_driver_v4-1.4\.zip$').Matches.Groups[1].Value
             $downloadsum_driver = Get-FileHash -Path rustdesk_printer_driver_v4-1.4.zip -Algorithm SHA256
@@ -308,22 +348,20 @@ jobs:
             ls -l ./libs/portable/Runner.res;
           fi
 
-      - name: Download RustDeskTempTopMostWindow artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ inputs.upload-artifact }}
-        with:
-          name: ${{ matrix.job.arch == 'aarch64' && 'topmostwindow-artifacts-ARM64' || 'topmostwindow-artifacts-x64' }}
-          path: "./rustdesk"
-
-      - name: Upload unsigned
-        if: env.UPLOAD_ARTIFACT == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}
-          path: rustdesk
+      - name: Download RustDeskTempTopMostWindow from R2
+        shell: bash
+        run: |
+          mkdir -p ./rustdesk
+          TW_PLATFORM=${{ matrix.job.arch == 'aarch64' && 'ARM64' || 'x64' }}
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/topmostwindow/${TW_PLATFORM}/WindowInjection.dll ./rustdesk/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Sign rustdesk files
-        if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
+        if: env.SIGN_BASE_URL != '-2'
         shell: bash
         run: |
           pip3 install requests argparse
@@ -331,7 +369,6 @@ jobs:
 
       - name: Build self-extracted executable
         shell: bash
-        if: env.UPLOAD_ARTIFACT == 'true'
         run: |
           sed -i '/dpiAware/d' res/manifest.xml
           pushd ./libs/portable
@@ -348,7 +385,6 @@ jobs:
         # Builds the MSI for the matrix arch. res/msi (WiX v4 + native CustomActions) carries
         # both x64 and ARM64 platform configs; WcaUtil/DUtil ship arm64 libs. msbuild platform
         # is x64 / ARM64; the produced Package.msi is globbed since its bin/<platform>/ dir varies.
-        if: env.UPLOAD_ARTIFACT == 'true'
         run: |
           pushd ./res/msi
           python preprocess.py --arp -d ../../rustdesk
@@ -360,27 +396,29 @@ jobs:
           sha256sum ../../SignOutput/rustdesk-*.msi
 
       - name: Sign rustdesk self-extracted file
-        if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
+        if: env.SIGN_BASE_URL != '-2'
         shell: bash
         run: |
           BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./SignOutput
 
-      - name: Publish Release
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        if: env.UPLOAD_ARTIFACT == 'true'
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            ./SignOutput/rustdesk-*.msi
-            ./SignOutput/rustdesk-*.exe
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          aws s3 cp ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.exe s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/windows/${{ matrix.job.arch }}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          aws s3 cp ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.msi s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/windows/${{ matrix.job.arch }}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   # The fallback for the flutter version, we use Sciter for 32bit Windows.
   build-for-windows-sciter:
     name: ${{ matrix.job.target }} (${{ matrix.job.os }})
     runs-on: ${{ matrix.job.os }}
-    # Temporarily disable this action due to additional test is needed.
-    # if: false
     strategy:
       fail-fast: false
       matrix:
@@ -431,24 +469,28 @@ jobs:
           doNotCache: false
 
       - name: Install vcpkg dependencies
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 60
+          max_attempts: 3
+          retry_wait_seconds: 120
+          command: |
+            $vcpkgRoot = $env:VCPKG_ROOT
+            & "$vcpkgRoot\vcpkg.exe" install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$vcpkgRoot\installed"
+            if ($LASTEXITCODE -ne 0) {
+              Get-ChildItem -Path $vcpkgRoot -Recurse -Filter *.log | ForEach-Object {
+                Write-Host "$($_.FullName):"
+                Write-Host "======"
+                Get-Content $_.FullName
+                Write-Host "======"
+                Write-Host ""
+              }
+              exit 1
+            }
+            $ffmpegLog = Join-Path $vcpkgRoot "buildtrees\ffmpeg\build-${{ matrix.job.vcpkg-triplet }}-rel-out.log"
+            Get-Content $ffmpegLog -Head 100 -ErrorAction SilentlyContinue
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
-        run: |
-          if ! $VCPKG_ROOT/vcpkg \
-            install \
-            --triplet ${{ matrix.job.vcpkg-triplet }} \
-            --x-install-root="$VCPKG_ROOT/installed"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-              echo "$_1:"
-              echo "======"
-              cat "$_1"
-              echo "======"
-              echo ""
-            done
-            exit 1
-          fi
-          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
-        shell: bash
 
       - name: Build rustdesk
         id: build
@@ -461,15 +503,29 @@ jobs:
           cargo build --locked --features inline,vram,hwcodec --release --bins
           mkdir -p ./Release
           mv ./target/release/rustdesk.exe ./Release/rustdesk.exe
-          curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
           echo "output_folder=./Release" >> $GITHUB_OUTPUT
-          curl -LJ -o ./usbmmidd_v2.zip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
-          unzip usbmmidd_v2.zip
-          # Do not remove x64 files, because the user may run the 32bit version on a 64bit system.
-          # Do not remove ./usbmmidd_v2/deviceinstaller64.exe, as x86 exe cannot install and uninstall drivers when running on x64,
-          # we need the x64 exe to install and uninstall the driver.
-          rm -rf ./usbmmidd_v2/deviceinstaller.exe ./usbmmidd_v2/usbmmidd.bat
-          mv ./usbmmidd_v2 ./Release || true
+
+      - name: Download sciter.dll with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 5
+          retry_wait_seconds: 60
+          command: |
+            $tmpSciter = Join-Path $PWD.Path ("sciter.dll.{0}" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 60 -o $tmpSciter https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x32/sciter.dll
+            Move-Item -Force $tmpSciter .\Release\sciter.dll
+
+      - name: Download usbmmidd_v2 with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            $tmpZip = Join-Path $PWD.Path ("usbmmidd_v2.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpZip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
+            Move-Item -Force $tmpZip .\usbmmidd_v2.zip
 
       - name: find Runner.res
         # Windows: find Runner.res (compiled from ./flutter/windows/runner/Runner.rc), copy to ./Runner.res
@@ -487,15 +543,8 @@ jobs:
             ls -l ./libs/portable/Runner.res;
           fi
 
-      - name: Upload unsigned
-        if: env.UPLOAD_ARTIFACT == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}
-          path: Release
-
       - name: Sign rustdesk files
-        if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
+        if: env.SIGN_BASE_URL != '-2'
         shell: bash
         run: |
           pip3 install requests argparse
@@ -513,22 +562,25 @@ jobs:
           mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.exe
 
       - name: Sign rustdesk self-extracted file
-        if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
+        if: env.SIGN_BASE_URL != '-2'
         shell: bash
         run: |
           BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./SignOutput/
 
-      - name: Publish Release
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        if: env.UPLOAD_ARTIFACT == 'true'
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            ./SignOutput/rustdesk-*.exe
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          aws s3 cp ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.exe s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/windows/x86/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   build-rustdesk-ios:
-    if: ${{ inputs.upload-artifact }}
+    # Disabled temporarily - iOS build issues
+    if: false
     name: build rustdesk ios ipa
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
@@ -569,11 +621,26 @@ jobs:
           cd $(dirname $(dirname $(which flutter)))
           [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
 
-      - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+      - name: Setup vcpkg with retry
+        uses: nick-fields/retry@v3
         with:
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
+          timeout_minutes: 30
+          max_attempts: 5
+          retry_wait_seconds: 60
+          command: |
+            # Setup vcpkg in default location
+            if [ ! -d "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}/.git" ]; then
+              git clone https://github.com/microsoft/vcpkg.git "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
+              cd "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
+              git checkout ${{ env.VCPKG_COMMIT_ID }}
+            fi
+            # Bootstrap vcpkg
+            cd "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
+            ./bootstrap-vcpkg.sh -disableMetrics
+            echo "VCPKG_ROOT=${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" >> $GITHUB_ENV
+          on_retry_command: |
+            echo "Retrying vcpkg setup..."
+            rm -rf "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" || true
 
       - name: Install vcpkg dependencies
         run: |
@@ -605,22 +672,26 @@ jobs:
           prefix-key: rustdesk-lib-cache-ios
           key: ${{ matrix.job.target }}
 
-      - name: Restore bridge files
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: bridge-artifact
-          path: ./
+      - name: Restore bridge files from R2
+        shell: bash
+        run: |
+          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          mv ./src/generated_bridge.dart ./flutter/lib/
+          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
+          mv ./src/bridge_generated.h ./flutter/macos/Runner/
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Build rustdesk lib
         run: |
           rustup target add ${{ matrix.job.target }}
           cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
           
-      - name: Upload liblibrustdesk.a Artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: liblibrustdesk.a
-          path: target/aarch64-apple-ios/release/liblibrustdesk.a
 
       - name: Build rustdesk
         shell: bash
@@ -629,22 +700,38 @@ jobs:
           # flutter build ipa --release --obfuscate --split-debug-info=./split-debug-info --no-codesign
           # for easy debugging
           flutter build ipa --release --no-codesign
+          # Verify the ipa was created
+          ls -la build/ios/ipa/ || { echo "ERROR: IPA directory not found"; exit 1; }
 
-      # - name: Upload Artifacts
-      #   # if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
-      #   uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      #   with:
-      #     name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
-      #     path: flutter/build/ios/ipa/*.ipa
+      - name: Install AWS CLI
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            cd /tmp
+            curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "AWSCLIV2.pkg"
+            sudo installer -pkg AWSCLIV2.pkg -target /
 
-      # - name: Publish ipa package
-      #   # if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
-      #   uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-      #   with:
-      #     prerelease: true
-      #     tag_name: ${{ env.TAG_NAME }}
-      #     files: |
-      #       flutter/build/ios/ipa/*.ipa
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          # Find the actual ipa file (flutter generates rustdesk.ipa or similar)
+          IPA_FILE=$(ls flutter/build/ios/ipa/*.ipa 2>/dev/null | head -1)
+          if [ -z "$IPA_FILE" ]; then
+            echo "ERROR: No .ipa file found in flutter/build/ios/ipa/"
+            ls -la flutter/build/ios/ipa/ || true
+            exit 1
+          fi
+          echo "Found IPA file: $IPA_FILE"
+          aws s3 cp "$IPA_FILE" s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/ios/arm64/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
 
   build-for-macOS:
@@ -708,13 +795,17 @@ jobs:
 
       - name: Install rcodesign tool
         if: env.MACOS_P12_BASE64 != null
-        shell: bash
-        run: |
-          pushd /tmp
-          wget https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F0.22.0/apple-codesign-0.22.0-macos-universal.tar.gz
-          tar -zxvf apple-codesign-0.22.0-macos-universal.tar.gz
-          mv apple-codesign-0.22.0-macos-universal/rcodesign /usr/local/bin
-          popd
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            pushd /tmp
+            wget https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F0.22.0/apple-codesign-0.22.0-macos-universal.tar.gz
+            tar -zxvf apple-codesign-0.22.0-macos-universal.tar.gz
+            mv apple-codesign-0.22.0-macos-universal/rcodesign /usr/local/bin
+            popd
 
       - name: Install build runtime
         run: |
@@ -727,15 +818,20 @@ jobs:
           fi
 
       - name: Install NASM
-        run: |
-          # Install NASM 2.16.x from official release.
-          # Do NOT use `brew install nasm` which installs NASM 3.x.
-          # NASM 3.x is a complete rewrite with incompatible CLI options and removed features.
-          # aom and other multimedia libraries require NASM 2.x for x86/x86_64 assembly.
-          wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
-          unzip nasm-2.16.03-macosx.zip
-          sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
-          nasm --version
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            # Install NASM 2.16.x from official release.
+            # Do NOT use `brew install nasm` which installs NASM 3.x.
+            # NASM 3.x is a complete rewrite with incompatible CLI options and removed features.
+            # aom and other multimedia libraries require NASM 2.x for x86/x86_64 assembly.
+            wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
+            unzip nasm-2.16.03-macosx.zip
+            sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
+            nasm --version
 
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -767,17 +863,41 @@ jobs:
         with:
           prefix-key: ${{ matrix.job.os }}
 
-      - name: Restore bridge files
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: bridge-artifact
-          path: ./
+      - name: Restore bridge files from R2
+        shell: bash
+        run: |
+          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          mv ./src/generated_bridge.dart ./flutter/lib/
+          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
+          mv ./src/bridge_generated.h ./flutter/macos/Runner/
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
-      - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+      - name: Setup vcpkg with retry
+        uses: nick-fields/retry@v3
         with:
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
+          timeout_minutes: 30
+          max_attempts: 5
+          retry_wait_seconds: 60
+          command: |
+            # Setup vcpkg in default location
+            if [ ! -d "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}/.git" ]; then
+              git clone https://github.com/microsoft/vcpkg.git "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
+              cd "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
+              git checkout ${{ env.VCPKG_COMMIT_ID }}
+            fi
+            # Bootstrap vcpkg
+            cd "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
+            ./bootstrap-vcpkg.sh -disableMetrics
+            echo "VCPKG_ROOT=${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" >> $GITHUB_ENV
+          on_retry_command: |
+            echo "Retrying vcpkg setup..."
+            rm -rf "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" || true
 
       - name: Install vcpkg dependencies
         run: |
@@ -817,22 +937,16 @@ jobs:
           ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
 
       - name: create unsigned dmg
-        if: env.UPLOAD_ARTIFACT == 'true'
         run: |
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
           create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
-
-      - name: Upload unsigned macOS app
-        if: env.UPLOAD_ARTIFACT == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rustdesk-unsigned-macos-${{ matrix.job.arch }}
-          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg # can not upload the directory directly or tar.gz, which destroy the link structure, causing the codesign failed
+          # Verify the dmg was created
+          ls -la rustdesk-*.dmg || { echo "ERROR: DMG file was not created"; exit 1; }
 
       - name: Codesign app and create signed dmg
-        if: env.MACOS_P12_BASE64 != null && env.UPLOAD_ARTIFACT == 'true'
+        if: env.MACOS_P12_BASE64 != null
         run: |
           # Patch create-dmg to give more attempts to unmount image
           CREATE_DMG="$(command -v create-dmg)"
@@ -849,64 +963,44 @@ jobs:
           # notarize the rustdesk-${{ env.VERSION }}.dmg
           rcodesign notary-submit --api-key-path ${{ github.workspace }}/rustdesk.json  --staple rustdesk-${{ env.VERSION }}.dmg
 
-      - name: Rename rustdesk
-        if: env.UPLOAD_ARTIFACT == 'true'
+      - name: Rename rustdesk (signed dmg only)
         run: |
-          for name in rustdesk*??.dmg; do
-              mv "$name" "${name%%.dmg}-${{ matrix.job.arch }}.dmg"
-          done
+          # Only rename the signed dmg which has no arch suffix
+          # The unsigned dmg already has the correct arch suffix from create-dmg
+          if [ -f "rustdesk-${{ env.VERSION }}.dmg" ]; then
+            mv "rustdesk-${{ env.VERSION }}.dmg" "rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg"
+          fi
+          # List all dmg files for debugging
+          ls -la *.dmg || true
 
-      - name: Publish DMG package
-        if: env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+      - name: Install AWS CLI
+        uses: nick-fields/retry@v3
         with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            rustdesk*-${{ matrix.job.arch }}.dmg
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            cd /tmp
+            curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "AWSCLIV2.pkg"
+            sudo installer -pkg AWSCLIV2.pkg -target /
 
-  publish_unsigned:
-    needs:
-      - build-for-macOS
-      - build-for-windows-flutter
-      - build-for-windows-sciter
-    runs-on: ubuntu-latest
-    if: ${{ inputs.upload-artifact }}
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rustdesk-unsigned-macos-x86_64
-          path: ./
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rustdesk-unsigned-macos-aarch64
-          path: ./
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rustdesk-unsigned-windows-x86_64
-          path: ./windows-x86_64/
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rustdesk-unsigned-windows-x86
-          path: ./windows-x86/
-
-      - name: Combine unsigned app
+      - name: Upload to R2
+        shell: bash
         run: |
-          tar czf rustdesk-${{ env.VERSION }}-unsigned.tar.gz *.dmg windows-x86_64 windows-x86
-
-      - name: Publish unsigned app
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: rustdesk-${{ env.VERSION }}-unsigned.tar.gz
+          DATE=$(date +%Y%m%d)
+          DMG_FILE="rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg"
+          if [ ! -f "$DMG_FILE" ]; then
+            echo "ERROR: $DMG_FILE not found, listing current directory:"
+            ls -la *.dmg || true
+            exit 1
+          fi
+          echo "Found DMG file: $DMG_FILE"
+          aws s3 cp "$DMG_FILE" s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/macos/${{ matrix.job.arch }}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   build-rustdesk-android:
     needs: [generate-bridge]
@@ -1013,46 +1107,80 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: true
 
-      - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+      - name: Setup vcpkg with retry
+        uses: nick-fields/retry@v3
         with:
-          vcpkgDirectory: /opt/artifacts/vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
+          timeout_minutes: 30
+          max_attempts: 5
+          retry_wait_seconds: 60
+          command: |
+            # Download vcpkg if not exists
+            if [ ! -d "/opt/artifacts/vcpkg/.git" ]; then
+              git clone https://github.com/microsoft/vcpkg.git /opt/artifacts/vcpkg
+              cd /opt/artifacts/vcpkg
+              git checkout ${{ env.VCPKG_COMMIT_ID }}
+            fi
+            # Bootstrap vcpkg
+            cd /opt/artifacts/vcpkg
+            ./bootstrap-vcpkg.sh -disableMetrics
+          on_retry_command: |
+            echo "Retrying vcpkg setup..."
+            rm -rf /opt/artifacts/vcpkg || true
+
+      - name: Set VCPKG_ROOT
+        run: echo "VCPKG_ROOT=/opt/artifacts/vcpkg" >> $GITHUB_ENV
 
       - name: Install vcpkg dependencies
-        run: |
-          case ${{ matrix.job.target }} in
-            aarch64-linux-android)
-              ANDROID_TARGET=arm64-v8a
-            ;;
-            armv7-linux-androideabi)
-              ANDROID_TARGET=armeabi-v7a
-            ;;
-            x86_64-linux-android)
-              ANDROID_TARGET=x86_64
-            ;;
-            i686-linux-android)
-              ANDROID_TARGET=x86
-            ;;
-          esac
-          if ! ./flutter/build_android_deps.sh "${ANDROID_TARGET}"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-              echo "$_1:"
-              echo "======"
-              cat "$_1"
-              echo "======"
-              echo ""
-            done
-            exit 1
-          fi
-        shell: bash
-
-      - name: Restore bridge files
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: nick-fields/retry@v3
         with:
-          name: bridge-artifact
-          path: ./
+          timeout_minutes: 60
+          max_attempts: 3
+          retry_wait_seconds: 120
+          command: |
+            case ${{ matrix.job.target }} in
+              aarch64-linux-android)
+                ANDROID_TARGET=arm64-v8a
+              ;;
+              armv7-linux-androideabi)
+                ANDROID_TARGET=armeabi-v7a
+              ;;
+              x86_64-linux-android)
+                ANDROID_TARGET=x86_64
+              ;;
+              i686-linux-android)
+                ANDROID_TARGET=x86
+              ;;
+            esac
+            if ! ./flutter/build_android_deps.sh "${ANDROID_TARGET}"; then
+              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+                echo "$_1:"
+                echo "======"
+                cat "$_1"
+                echo "======"
+                echo ""
+              done
+              exit 1
+            fi
+          on_retry_command: |
+            echo "Retrying vcpkg install, cleaning up..."
+            rm -rf ${VCPKG_ROOT}/buildtrees ${VCPKG_ROOT}/installed ${VCPKG_ROOT}/packages || true
+        env:
+          VCPKG_ROOT: /opt/artifacts/vcpkg
+
+      - name: Restore bridge files from R2
+        shell: bash
+        run: |
+          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/ ./src/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          mv ./src/generated_bridge.dart ./flutter/lib/
+          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
+          mv ./src/bridge_generated.h ./flutter/macos/Runner/
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -1065,13 +1193,20 @@ jobs:
           prefix-key: rustdesk-lib-cache-android # TODO: drop '-android' part after caches are invalidated
           key: ${{ matrix.job.target }}
 
+      - name: Install cargo-ndk with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
+
       - name: Build rustdesk lib
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           rustup target add ${{ matrix.job.target }}
-          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
           case ${{ matrix.job.target }} in
             aarch64-linux-android)
               ./flutter/ndk_arm64.sh
@@ -1094,12 +1229,6 @@ jobs:
               cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/x86/librustdesk.so
             ;;
           esac
-
-      - name: Upload Rustdesk library to Artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: librustdesk.so.${{ matrix.job.target }}
-          path: ./target/${{ matrix.job.target }}/release/liblibrustdesk.so
 
       - name: Build rustdesk
         shell: bash
@@ -1175,35 +1304,58 @@ jobs:
           # env.ANDROID_SIGN_TOOL_VERSION is set by Step "Setup sign tool version variable"
           BUILD_TOOLS_VERSION: ${{ env.ANDROID_SIGN_TOOL_VERSION }}
 
-      - name: Upload Artifacts
-        if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
-          path: ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          if [ "${{ env.ANDROID_SIGNING_KEY }}" != "" ]; then
+            APK_FILE="${{steps.sign-rustdesk.outputs.signedReleaseFile}}"
+          else
+            APK_FILE="signed-apk/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk"
+          fi
+          case ${{ matrix.job.arch }} in
+            aarch64) ANDROID_ARCH="arm64-v8a" ;;
+            armv7) ANDROID_ARCH="armeabi-v7a" ;;
+            x86_64) ANDROID_ARCH="x86_64" ;;
+          esac
+          aws s3 cp "$APK_FILE" s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/android/${ANDROID_ARCH}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
-      - name: Publish signed apk package
-        if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
-
-      - name: Publish unsigned apk package
-        if: env.ANDROID_SIGNING_KEY == null && env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            signed-apk/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
+      - name: Upload librustdesk.so to R2 (intermediate)
+        shell: bash
+        run: |
+          case ${{ matrix.job.target }} in
+            aarch64-linux-android)
+              LIB_NAME="librustdesk.so.aarch64-linux-android"
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
+            ;;
+            armv7-linux-androideabi)
+              LIB_NAME="librustdesk.so.armv7-linux-androideabi"
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
+            ;;
+            x86_64-linux-android)
+              LIB_NAME="librustdesk.so.x86_64-linux-android"
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
+            ;;
+            i686-linux-android)
+              LIB_NAME="librustdesk.so.i686-linux-android"
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
+            ;;
+          esac
+          aws s3 cp /tmp/${LIB_NAME} s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/android-libs/${LIB_NAME} \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   build-rustdesk-android-universal:
     needs: [build-rustdesk-android]
     name: build rustdesk android universal apk
-    if: ${{ inputs.upload-artifact }}
     runs-on: ubuntu-24.04
     env:
       reltype: release
@@ -1279,36 +1431,40 @@ jobs:
           cd $(dirname $(dirname $(which flutter)))
           [[ "3.24.5" == ${{env.ANDROID_FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
 
-      - name: Restore bridge files
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: bridge-artifact
-          path: ./
+      - name: Restore bridge files from R2
+        shell: bash
+        run: |
+          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          mv ./src/generated_bridge.dart ./flutter/lib/
+          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
+          mv ./src/bridge_generated.h ./flutter/macos/Runner/
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
-      - name: Download Rustdesk library from Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: librustdesk.so.aarch64-linux-android
-          path: ./flutter/android/app/src/main/jniLibs/arm64-v8a
-
-      - name: Download Rustdesk library from Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: librustdesk.so.armv7-linux-androideabi
-          path: ./flutter/android/app/src/main/jniLibs/armeabi-v7a
-
-      - name: Download Rustdesk library from Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: librustdesk.so.x86_64-linux-android
-          path: ./flutter/android/app/src/main/jniLibs/x86_64
-
-      - name: Download Rustdesk library from Artifacts
-        if: ${{ env.reltype == 'debug' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: librustdesk.so.i686-linux-android
-          path: ./flutter/android/app/src/main/jniLibs/x86
+      - name: Download Rustdesk libraries from R2
+        shell: bash
+        run: |
+          mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
+          mkdir -p ./flutter/android/app/src/main/jniLibs/armeabi-v7a
+          mkdir -p ./flutter/android/app/src/main/jniLibs/x86_64
+          
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/android-libs/librustdesk.so.aarch64-linux-android ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/android-libs/librustdesk.so.armv7-linux-androideabi ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/android-libs/librustdesk.so.x86_64-linux-android ./flutter/android/app/src/main/jniLibs/x86_64/librustdesk.so \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Build rustdesk
         shell: bash
@@ -1320,16 +1476,10 @@ jobs:
           sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
           # temporary use debug sign config
           sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
-          mv ./flutter/android/app/src/main/jniLibs/arm64-v8a/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+          # Copy c++_shared.so
           cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/
-          mv ./flutter/android/app/src/main/jniLibs/armeabi-v7a/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
           cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/
-          mv ./flutter/android/app/src/main/jniLibs/x86_64/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/x86_64/librustdesk.so
           cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/x86_64/
-          if [ "${{ env.reltype }}" = "debug" ]; then
-            mv ./flutter/android/app/src/main/jniLibs/x86/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/x86/librustdesk.so
-            cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/i686-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/x86/
-          fi
           # build flutter
           pushd flutter
           flutter build apk "--${{ env.reltype }}" --target-platform android-arm64,android-arm,android-x64${{ env.x86_target }}
@@ -1359,30 +1509,21 @@ jobs:
           # env.ANDROID_SIGN_TOOL_VERSION is set by Step "Setup sign tool version variable"
           BUILD_TOOLS_VERSION: ${{ env.ANDROID_SIGN_TOOL_VERSION }}
 
-      - name: Upload Artifacts
-        if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
-          path: ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
-
-      - name: Publish signed apk package
-        if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
-
-      - name: Publish unsigned apk package
-        if: env.ANDROID_SIGNING_KEY == null && env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            signed-apk/rustdesk-${{ env.VERSION }}-universal${{ env.suffix }}.apk
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          if [ "${{ env.ANDROID_SIGNING_KEY }}" != "" ]; then
+            APK_FILE="${{steps.sign-rustdesk.outputs.signedReleaseFile}}"
+          else
+            APK_FILE="signed-apk/rustdesk-${{ env.VERSION }}-universal${{ env.suffix }}.apk"
+          fi
+          aws s3 cp "$APK_FILE" s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/android/universal/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   build-rustdesk-linux:
     needs: [generate-bridge]
@@ -1462,23 +1603,47 @@ jobs:
           # only build cdylib
           sed -i  "s/\[\"cdylib\", \"staticlib\", \"rlib\"\]/\[\"cdylib\"\]/g" Cargo.toml
 
-      - name: Restore bridge files
+      - name: Restore bridge files from R2
         if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: bridge-artifact
-          path: ./
+        shell: bash
+        run: |
+          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/ ./src/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          mv ./src/generated_bridge.dart ./flutter/lib/
+          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
+          mv ./src/bridge_generated.h ./flutter/macos/Runner/
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
-      - name: Setup vcpkg with Github Actions binary cache
+      - name: Setup vcpkg with retry
         if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
-        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        uses: nick-fields/retry@v3
         with:
-          vcpkgDirectory: /opt/artifacts/vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
+          timeout_minutes: 30
+          max_attempts: 5
+          retry_wait_seconds: 60
+          command: |
+            # Download vcpkg if not exists
+            if [ ! -d "/opt/artifacts/vcpkg/.git" ]; then
+              git clone https://github.com/microsoft/vcpkg.git /opt/artifacts/vcpkg
+              cd /opt/artifacts/vcpkg
+              git checkout ${{ env.VCPKG_COMMIT_ID }}
+            fi
+            # Bootstrap vcpkg
+            cd /opt/artifacts/vcpkg
+            ./bootstrap-vcpkg.sh -disableMetrics
+          on_retry_command: |
+            echo "Retrying vcpkg setup..."
+            rm -rf /opt/artifacts/vcpkg || true
+
+      - name: Set VCPKG_ROOT
+        run: echo "VCPKG_ROOT=/opt/artifacts/vcpkg" >> $GITHUB_ENV
 
       - name: Install vcpkg dependencies
-        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         run: |
           sudo apt install -y libva-dev && apt show libva-dev
           if ! $VCPKG_ROOT/vcpkg \
@@ -1497,17 +1662,25 @@ jobs:
           head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
         shell: bash
 
-      - name: Restore bridge files
+      - name: Restore bridge files from R2
         if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: bridge-artifact
-          path: ./
+        shell: bash
+        run: |
+          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/ ./src/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          mv ./src/generated_bridge.dart ./flutter/lib/
+          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
+          mv ./src/bridge_generated.h ./flutter/macos/Runner/
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - uses: rustdesk-org/run-on-arch-action@d3fcfbb632b84cf7f6bc772bfaaa2c2f4f8789a8 # no release tag; commit 2026-05-26
         name: Build rustdesk
         id: vcpkg
-        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         with:
           arch: ${{ matrix.job.arch }}
           distro: ${{ matrix.job.distro }}
@@ -1676,28 +1849,35 @@ jobs:
                 mv "$name" /workspace/"${name%%.rpm}-suse.rpm"
             done
 
-      - name: Publish debian/rpm package
-        if: env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            rustdesk-*.deb
-            rustdesk-*.rpm
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.rpm s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto || true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
-      - name: Upload deb
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: env.UPLOAD_ARTIFACT == 'true'
-        with:
-          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
-          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
+      - name: Upload .deb to R2 (intermediate)
+        shell: bash
+        run: |
+          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/linux-debs/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       # only x86_64 for arch since we can not find newest arm64 docker image to build
       # old arch image does not make sense for arch since it is "arch" which always update to date
       # and failed to makepkg arm64 on x86_64
       - name: Patch archlinux PKGBUILD
-        if: matrix.job.arch == 'x86_64' && env.UPLOAD_ARTIFACT == 'true'
+        if: matrix.job.arch == 'x86_64'
         run: |
           sed -i "s/x86_64/${{ matrix.job.arch }}/g" res/PKGBUILD
           if [[ "${{ matrix.job.arch }}" == "aarch64" ]]; then
@@ -1712,17 +1892,19 @@ jobs:
           scripts: |
             cd res && HBB=`pwd`/.. FLUTTER=1 makepkg -f
 
-      - name: Publish archlinux package
-        if: matrix.job.arch == 'x86_64' && env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            res/rustdesk-${{ env.VERSION }}*.zst
+      - name: Upload archlinux package to R2
+        if: matrix.job.arch == 'x86_64'
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          aws s3 cp res/rustdesk-${{ env.VERSION }}*.zst s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/x86_64/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   build-rustdesk-linux-sciter:
-    if: ${{ inputs.upload-artifact }}
     runs-on: ${{ matrix.job.on }}
     name: build-rustdesk-linux-sciter ${{ matrix.job.target }}
     strategy:
@@ -1920,9 +2102,22 @@ jobs:
             # make debian package
             mkdir -p ./Release
             mv ./target/release/rustdesk ./Release/rustdesk
-            wget -O ./Release/libsciter-gtk.so https://github.com/c-smile/sciter-sdk/raw/master/bin.lnx/${{ matrix.job.sciter_arch }}/libsciter-gtk.so
             export DEB_ARCH=${{ matrix.job.deb_arch }}
             ./build.py --package ./Release
+
+      - name: Download Linux sciter library with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 5
+          retry_wait_seconds: 60
+          command: |
+            tmp_sciter="$(mktemp ./libsciter-gtk.XXXXXX)"
+            curl -fL --retry 5 --retry-all-errors --retry-delay 60 \
+              -o "$tmp_sciter" \
+              https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/${{ matrix.job.sciter_arch }}/libsciter-gtk.so
+            sudo rm -f ./Release/libsciter-gtk.so
+            sudo install -m 644 "$tmp_sciter" ./Release/libsciter-gtk.so
 
       - name: Rename rustdesk
         shell: bash
@@ -1932,27 +2127,31 @@ jobs:
               cp "$name" "${name%%.deb}-${{ matrix.job.arch }}-sciter.deb"
           done
 
-      - name: Publish debian package
-        if: env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
-      - name: Upload deb
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: env.UPLOAD_ARTIFACT == 'true'
-        with:
-          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb
-          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb
+      - name: Upload sciter .deb to R2 (intermediate)
+        shell: bash
+        run: |
+          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/linux-debs/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   build-appimage:
     name: Build appimage ${{ matrix.job.target }}
     needs: [build-rustdesk-linux]
     runs-on: ubuntu-22.04
-    if: ${{ inputs.upload-artifact }}
     strategy:
       fail-fast: false
       matrix:
@@ -1965,15 +2164,30 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Download Binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
-          path: .
+      - name: Download Binary from R2
+        shell: bash
+        run: |
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/linux-debs/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb . \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Rename Binary
         run: |
           mv rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb appimage/rustdesk.deb
+
+      - name: Install appimage-builder with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: |
+            sudo apt-get update -y
+            sudo apt-get install -y libarchive-tools libfuse2
+            sudo pip3 install git+https://github.com/rustdesk-org/appimage-builder.git
 
       - name: Build appimage package
         shell: bash
@@ -1990,14 +2204,16 @@ jobs:
           pushd appimage
           sudo appimage-builder --skip-tests --recipe ./AppImageBuilder-${{ matrix.job.arch }}.yml
 
-      - name: Publish appimage package
-        if: env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            ./appimage/rustdesk-${{ env.VERSION }}-*.AppImage
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          aws s3 cp ./appimage/rustdesk-${{ env.VERSION }}-*.AppImage s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   build-flatpak:
     name: Build flatpak ${{ matrix.job.target }}${{ matrix.job.suffix }}
@@ -2005,7 +2221,6 @@ jobs:
       - build-rustdesk-linux
       - build-rustdesk-linux-sciter
     runs-on: ${{ matrix.job.on }}
-    if: ${{ inputs.upload-artifact }}
     strategy:
       fail-fast: false
       matrix:
@@ -2039,11 +2254,15 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Download Binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.deb
-          path: .
+      - name: Download Binary from R2
+        shell: bash
+        run: |
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/linux-debs/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.deb . \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Rename Binary
         run: |
@@ -2076,13 +2295,16 @@ jobs:
             flatpak-builder --user --install-deps-from=flathub -y --force-clean --repo=repo ./build ./rustdesk.json
             flatpak build-bundle ./repo rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.flatpak com.rustdesk.RustDesk
 
-      - name: Publish flatpak package
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            flatpak/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.flatpak
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          aws s3 cp flatpak/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.flatpak s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   build-rustdesk-web:
     if: False
@@ -2148,11 +2370,13 @@ jobs:
           sha256sum "${dir_name}".tar.gz
           popd
 
-      - name: Publish web
-        if: env.UPLOAD_ARTIFACT == 'true'
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG_NAME }}
-          files: |
-            flutter/build/rustdesk-${{ env.VERSION }}-${{ env.RELEASE_NAME }}.tar.gz
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          aws s3 cp flutter/build/rustdesk-${{ env.VERSION }}-${{ env.RELEASE_NAME }}.tar.gz s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/web/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

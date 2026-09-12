@@ -3,9 +3,6 @@ name: build RustDeskTempTopMostWindow
 on:
   workflow_call:
     inputs:
-        upload-artifact:
-          type: boolean
-          default: true
         target:
             description: 'Target'
             required: true
@@ -50,10 +47,12 @@ jobs:
           cd RustDeskTempTopMostWindow && git checkout ecd8d6a139eee76845ea66423fb739af450fda90
           msbuild ${{ env.project_path }} -p:Configuration=${{ inputs.configuration }} -p:Platform=${{ inputs.platform }} /p:TargetVersion=${{ inputs.target_version }}
 
-      - name: Archive build artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: ${{ inputs.upload-artifact }}
-        with:
-            name: topmostwindow-artifacts-${{ inputs.platform }}
-            path: |
-              ./${{ env.build_output_dir }}/WindowInjection.dll
+      - name: Upload to R2
+        shell: bash
+        run: |
+          aws s3 cp ./${{ env.build_output_dir }}/WindowInjection.dll s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/topmostwindow/${{ inputs.platform }}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

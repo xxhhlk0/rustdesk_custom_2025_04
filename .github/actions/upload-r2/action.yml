@@ -1,0 +1,56 @@
+name: 'Upload to R2'
+description: 'Upload build artifacts to Cloudflare R2'
+inputs:
+  files:
+    description: 'Files to upload (glob pattern supported)'
+    required: true
+  platform:
+    description: 'Platform name (e.g., windows, macos, linux, android, ios)'
+    required: true
+  arch:
+    description: 'Architecture (e.g., x86_64, aarch64, armv7)'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Configure AWS CLI for R2
+      shell: bash
+      run: |
+        aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
+        aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        aws configure set region auto
+    
+    - name: Upload files to R2
+      shell: bash
+      run: |
+        VERSION="${{ env.VERSION }}"
+        BUILD_DATE=$(date +%Y%m%d)
+        PLATFORM="${{ inputs.platform }}"
+        ARCH="${{ inputs.arch }}"
+        R2_BUCKET="${{ secrets.R2_BUCKET_NAME }}"
+        R2_ENDPOINT="${{ secrets.R2_ENDPOINT_URL }}"
+        
+        if [ -n "$ARCH" ]; then
+          R2_PATH="${VERSION}/${BUILD_DATE}/${PLATFORM}/${ARCH}"
+        else
+          R2_PATH="${VERSION}/${BUILD_DATE}/${PLATFORM}"
+        fi
+        
+        echo "Uploading to R2: s3://${R2_BUCKET}/${R2_PATH}/"
+        
+        # Handle glob patterns
+        for FILE in ${{ inputs.files }}; do
+          if [ -f "$FILE" ]; then
+            FILENAME=$(basename "$FILE")
+            echo "Uploading: $FILE -> ${R2_PATH}/${FILENAME}"
+            aws s3 cp "$FILE" "s3://${R2_BUCKET}/${R2_PATH}/${FILENAME}" \
+              --endpoint-url "$R2_ENDPOINT" \
+              --region auto
+          else
+            echo "Warning: File not found: $FILE"
+          fi
+        done
+        
+        echo "Upload completed!"
