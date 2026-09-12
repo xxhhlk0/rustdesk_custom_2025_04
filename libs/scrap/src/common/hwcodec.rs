@@ -1,5 +1,8 @@
 use crate::{
-    codec::{base_bitrate, codec_thread_num, enable_hwcodec_option, EncoderApi, EncoderCfg},
+    codec::{
+        base_bitrate, codec_thread_num, enable_hwcodec_option, EncoderApi, EncoderCfg,
+        HwEncoderParams,
+    },
     convert::*,
     CodecFormat, EncodeInput, ImageFormat, ImageRgb, Pixfmt, HW_STRIDE_ALIGN,
 };
@@ -39,6 +42,25 @@ lazy_static::lazy_static! {
     static ref CONFIG_SET_BY_IPC: std::sync::Arc<std::sync::Mutex<bool>> = Default::default();
 }
 
+/// 编码预设与码率控制枚举映射 (数值语义见 codec.rs HwEncoderParams)
+fn map_quality(v: i32) -> Quality {
+    match v {
+        1 => Quality_High,
+        2 => Quality_Medium,
+        3 => Quality_Low,
+        _ => Quality_Default,
+    }
+}
+
+fn map_rate_control(v: i32) -> RateControl {
+    match v {
+        1 => RC_CBR,
+        2 => RC_VBR,
+        3 => RC_CQ,
+        _ => RC_DEFAULT,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HwRamEncoderConfig {
     pub name: String,
@@ -47,6 +69,7 @@ pub struct HwRamEncoderConfig {
     pub height: usize,
     pub quality: f32,
     pub keyframe_interval: Option<usize>,
+    pub params: Option<HwEncoderParams>,
 }
 
 pub struct HwRamEncoder {
@@ -64,11 +87,24 @@ impl EncoderApi for HwRamEncoder {
     {
         match cfg {
             EncoderCfg::HWRAM(config) => {
-                let rc = Self::rate_control(&config);
-                let mut bitrate =
-                    Self::bitrate(&config.name, config.width, config.height, config.quality);
+                let params = config.params.clone().unwrap_or_default();
+                let rc = match params.rc {
+                    Some(v) => map_rate_control(v),
+                    None => Self::rate_control(&config),
+                };
+                let quality = match params.preset {
+                    Some(v) => map_quality(v),
+                    None => DEFAULT_HW_QUALITY,
+                };
+                let mut bitrate = match params.kbs {
+                    Some(k) => k,
+                    None => Self::bitrate(&config.name, config.width, config.height, config.quality),
+                };
                 bitrate = Self::check_bitrate_range(&config, bitrate);
-                let gop = config.keyframe_interval.unwrap_or(DEFAULT_GOP as _) as i32;
+                let gop = params
+                    .gop
+                    .unwrap_or(config.keyframe_interval.unwrap_or(DEFAULT_GOP as _) as _);
+                let fps = params.fps.unwrap_or(DEFAULT_FPS);
                 let ctx = EncodeContext {
                     name: config.name.clone(),
                     mc_name: config.mc_name.clone(),
@@ -77,11 +113,11 @@ impl EncoderApi for HwRamEncoder {
                     pixfmt: DEFAULT_PIXFMT,
                     align: HW_STRIDE_ALIGN as _,
                     kbs: bitrate as i32,
-                    fps: DEFAULT_FPS,
+                    fps,
                     gop,
-                    quality: DEFAULT_HW_QUALITY,
+                    quality,
                     rc,
-                    q: -1,
+                    q: params.q.unwrap_or(-1),
                     thread_count: codec_thread_num(16) as _, // ffmpeg's thread_count is used for cpu
                 };
                 let format = match Encoder::format_from_name(config.name.clone()) {

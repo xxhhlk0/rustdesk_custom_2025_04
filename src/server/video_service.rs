@@ -980,6 +980,9 @@ fn get_encoder_config(
     // https://www.wowza.com/community/t/the-correct-keyframe-interval-in-obs-studio/95162
     let keyframe_interval = if record { Some(240) } else { None };
     let negotiated_codec = Encoder::negotiated_codec();
+    // 硬件编码 profile (预置档/自定义 + 按客户端覆盖)
+    #[cfg(feature = "hwcodec")]
+    let hw_params = crate::hw_encode_profile::hw_params(record);
     match negotiated_codec {
         CodecFormat::H264 | CodecFormat::H265 => {
             #[cfg(feature = "vram")]
@@ -991,6 +994,10 @@ fn get_encoder_config(
                     quality,
                     feature,
                     keyframe_interval,
+                    #[cfg(feature = "hwcodec")]
+                    params: hw_params.clone(),
+                    #[cfg(not(feature = "hwcodec"))]
+                    params: None,
                 });
             }
             #[cfg(feature = "hwcodec")]
@@ -1002,6 +1009,7 @@ fn get_encoder_config(
                     height: c.height,
                     quality,
                     keyframe_interval,
+                    params: hw_params.clone(),
                 });
             }
             EncoderCfg::VPX(VpxEncoderConfig {
@@ -1326,7 +1334,10 @@ fn check_qos(
 ) -> ResultType<()> {
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     *spf = video_qos.spf();
-    if *ratio != video_qos.ratio() {
+    // 硬件编码 profile: bitrate_adaptive=false 时抑制运行期动态码率调整 (保持 profile 固定码率/参数);
+    // 录制状态切换与显示数据更新不受影响。
+    let bitrate_adaptive = crate::hw_encode_profile::bitrate_adaptive();
+    if bitrate_adaptive && *ratio != video_qos.ratio() {
         *ratio = video_qos.ratio();
         if encoder.support_changing_quality() {
             allow_err!(encoder.set_quality(*ratio));

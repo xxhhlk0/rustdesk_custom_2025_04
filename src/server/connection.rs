@@ -6487,6 +6487,7 @@ mod raii {
                 shutdown_hooks::add_shutdown_hook(connection_shutdown_hook);
             });
             if conn_type == AuthConnType::Remote || conn_type == AuthConnType::ViewCamera {
+                crate::hw_encode_profile::on_connection_open(conn_id, &lr.my_id);
                 video_service::VIDEO_QOS
                     .lock()
                     .unwrap()
@@ -6608,6 +6609,7 @@ mod raii {
     impl Drop for AuthedConnID {
         fn drop(&mut self) {
             if self.1 == AuthConnType::Remote || self.1 == AuthConnType::ViewCamera {
+                crate::hw_encode_profile::on_connection_close(self.0);
                 scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Remove(self.0));
                 video_service::VIDEO_QOS
                     .lock()

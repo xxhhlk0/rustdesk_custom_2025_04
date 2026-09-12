@@ -43,6 +43,7 @@ mod clipboard;
 pub mod core_main;
 mod custom_server;
 mod lang;
+mod hw_encode_profile;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod port_forward;
 

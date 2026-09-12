@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    codec::{enable_vram_option, EncoderApi, EncoderCfg},
+    codec::{enable_vram_option, EncoderApi, EncoderCfg, HwEncoderParams},
     hwcodec::HwCodecConfig,
     AdapterDevice, CodecFormat, EncodeInput, EncodeYuvFormat, Pixfmt,
 };
@@ -42,6 +42,9 @@ pub struct VRamEncoderConfig {
     pub quality: f32,
     pub feature: FeatureContext,
     pub keyframe_interval: Option<usize>,
+    /// 注意: VRAM 通道参数面较窄, 仅支持 kbs / fps / gop 覆盖;
+    /// preset(编码预设)与 rc(码率控制)在 hwcodec C 库内写死, 此处忽略。
+    pub params: Option<HwEncoderParams>,
 }
 
 pub struct VRamEncoder {
@@ -60,13 +63,19 @@ impl EncoderApi for VRamEncoder {
     {
         match cfg {
             EncoderCfg::VRAM(config) => {
-                let bitrate = Self::bitrate(
-                    config.feature.data_format,
-                    config.width,
-                    config.height,
-                    config.quality,
-                );
-                let gop = config.keyframe_interval.unwrap_or(MAX_GOP as _) as i32;
+                let params = config.params.clone().unwrap_or_default();
+                let bitrate = match params.kbs {
+                    Some(k) => k,
+                    None => Self::bitrate(
+                        config.feature.data_format,
+                        config.width,
+                        config.height,
+                        config.quality,
+                    ),
+                };
+                let gop = params
+                    .gop
+                    .unwrap_or(config.keyframe_interval.unwrap_or(MAX_GOP as _) as _);
                 let ctx = EncodeContext {
                     f: config.feature.clone(),
                     d: DynamicContext {
@@ -74,7 +83,7 @@ impl EncoderApi for VRamEncoder {
                         width: config.width as _,
                         height: config.height as _,
                         kbitrate: bitrate as _,
-                        framerate: 30,
+                        framerate: params.fps.unwrap_or(30),
                         gop,
                     },
                 };
