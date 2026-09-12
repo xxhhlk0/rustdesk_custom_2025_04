@@ -2,13 +2,13 @@
 
 ## 概述
 
-本项目基于官方 RustDesk 1.4.6 版本进行自定义构建，所有构建产物上传到 Cloudflare R2 私有存储，不依赖 GitHub Artifacts，适合公开仓库使用。
+本项目基于官方 RustDesk 1.4.9 版本进行自定义构建（已从 1.4.6 rebase 同步到上游 1.4.9 发版 tag），所有构建产物上传到 Cloudflare R2 私有存储，不依赖 GitHub Artifacts，适合公开仓库使用。
 
 ## 主要修改
 
 ### 1. 工作流同步与简化
 
-- 从官方 rustdesk/rustdesk 1.4.6 版本同步所有 workflow 文件
+- 以官方 rustdesk/rustdesk 1.4.9 版本 workflows 为底，保留全部自定义改动
 - 移除所有自动触发条件（schedule、push、pull_request、release），仅保留手动触发（workflow_dispatch）
 
 ### 2. 产物存储方案
@@ -38,7 +38,7 @@
 │       ├── rustdesk-{VERSION}-x86_64.deb
 │       └── rustdesk-{VERSION}-x86_64-sciter.deb
 │
-└── 1.4.6/{DATE}/                 # 最终产物（长期保存）
+└── 1.4.9/{DATE}/                 # 最终产物（长期保存）
     ├── windows/x86_64/
     │   ├── rustdesk-{VERSION}-x86_64.exe
     │   └── rustdesk-{VERSION}-x86_64.msi
@@ -115,10 +115,10 @@
 
 ```bash
 # 列出所有构建
-aws s3 ls s3://{R2_BUCKET}/1.4.6/ --endpoint-url {R2_ENDPOINT_URL} --region auto
+aws s3 ls s3://{R2_BUCKET}/1.4.9/ --endpoint-url {R2_ENDPOINT_URL} --region auto
 
 # 下载文件
-aws s3 cp s3://{R2_BUCKET}/1.4.6/20260425/windows/x86_64/rustdesk-1.4.6-x86_64.exe . \
+aws s3 cp s3://{R2_BUCKET}/1.4.9/20260425/windows/x86_64/rustdesk-1.4.9-x86_64.exe . \
   --endpoint-url {R2_ENDPOINT_URL} \
   --region auto
 ```
@@ -153,3 +153,31 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 2. **清理策略**：建议定期清理 `builds/` 目录下的旧构建中间产物
 3. **R2 费用**：关注存储量和流量，Cloudflare R2 免费额度为 10GB 存储/月
 4. **playground.yml**：此工作流未修改，如需使用需单独配置
+
+## 自定义功能
+
+### 1. 远程控制会话不发送 token
+
+当且仅当建立远程控制会话（`ConnType::DEFAULT_CONN`）时，客户端不向 hbbs 发送 token：
+`secure_tcp` 门控、`PunchHoleRequest`、`RequestRelay` 均不再携带（与上游 `other_server` 分支行为一致）。
+其他场景保留：HC 心跳通道 token、账号 API `Authorization: Bearer`、
+文件传输 / 端口转发 / 摄像头 / 终端会话 token。
+
+### 2. 硬件编码参数 profile（视频流）
+
+被控端（主机）编码参数可选，位于 设置 → 显示 → Hardware Encode Profile：
+
+| 预置档 | 编码预设(preset) | 码率控制(rc) | GOP | 说明 |
+|---|---|---|---|---|
+| latency 低延迟 | Low (nvenc p1 / qsv veryfast / amf speed) | CBR | 默认 | 流畅优先 |
+| balanced 均衡（默认） | Default | CBR | 默认 | 与官方行为一致 |
+| quality 画质 | Medium (nvenc p4 / qsv medium / amf balanced) | VBR | 240 | 画质优先 |
+| custom 自定义 | 逐项 | 逐项 | 逐项 | 码率/QP/FPS/GOP/自适应开关 |
+
+- 配置存储：全局 option `hw-encode-profile`（预置档 id 或 JSON），修改后对新会话生效
+- 按客户端覆盖：PeerConfig option `hw-encode-profile`（按 peer id），
+  最近连接的带覆盖客户端生效，其断开后回落全局默认
+- `bitrate_adaptive=false` 时抑制 VideoQoS 运行期动态码率调整
+- 录制会话的 240 帧关键帧间隔优先于 profile 的 GOP 覆盖
+- VRAM 通道（GPU 纹理直达）仅支持 码率/FPS/GOP；preset 与 rc 仅作用于 RAM 硬编路径
+  （hwcodec C 库写死）
