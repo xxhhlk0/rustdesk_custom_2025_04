@@ -2003,6 +2003,10 @@ class _DisplayState extends State<_Display> {
   final _customFpsCtrl = TextEditingController();
   final _customGopCtrl = TextEditingController();
   bool _customAdaptive = true;
+  final _customSpatialAqCtrl = TextEditingController();
+  final _customTemporalAqCtrl = TextEditingController();
+  final _customMultipassCtrl = TextEditingController();
+  final _customPreanalysisCtrl = TextEditingController();
   final _hwPeerIdCtrl = TextEditingController();
   String _hwPeerProfile = 'latency';
 
@@ -2014,6 +2018,10 @@ class _DisplayState extends State<_Display> {
     _customQCtrl.dispose();
     _customFpsCtrl.dispose();
     _customGopCtrl.dispose();
+    _customSpatialAqCtrl.dispose();
+    _customTemporalAqCtrl.dispose();
+    _customMultipassCtrl.dispose();
+    _customPreanalysisCtrl.dispose();
     _hwPeerIdCtrl.dispose();
     super.dispose();
   }
@@ -2039,6 +2047,10 @@ class _DisplayState extends State<_Display> {
         _customQCtrl.text = s(map['q']);
         _customFpsCtrl.text = s(map['fps']);
         _customGopCtrl.text = s(map['gop']);
+        _customSpatialAqCtrl.text = s(map['spatial_aq']);
+        _customTemporalAqCtrl.text = s(map['temporal_aq']);
+        _customMultipassCtrl.text = s(map['multipass']);
+        _customPreanalysisCtrl.text = s(map['preanalysis']);
         _customAdaptive = map['bitrate_adaptive'] != false;
       } catch (e) {
         debugPrint('failed to parse hw-encode-profile: $e');
@@ -2066,6 +2078,10 @@ class _DisplayState extends State<_Display> {
       'q': _hwParseInt(_customQCtrl.text),
       'fps': _hwParseInt(_customFpsCtrl.text),
       'gop': _hwParseInt(_customGopCtrl.text),
+      'spatial_aq': _hwParseInt(_customSpatialAqCtrl.text),
+      'temporal_aq': _hwParseInt(_customTemporalAqCtrl.text),
+      'multipass': _hwParseInt(_customMultipassCtrl.text),
+      'preanalysis': _hwParseInt(_customPreanalysisCtrl.text),
       'bitrate_adaptive': _customAdaptive,
     };
     return jsonEncode(map);
@@ -2208,6 +2224,43 @@ class _DisplayState extends State<_Display> {
           _hwField('QP (0-51, CQ only)', _customQCtrl, number: true, hint: 'Auto if empty'),
           _hwField('FPS', _customFpsCtrl, number: true, hint: '30 if empty'),
           _hwField('GOP', _customGopCtrl, number: true, hint: 'Default if empty'),
+          _hwDropdown('Spatial AQ (nvenc)', _customSpatialAqCtrl.text, {
+            '': 'Default',
+            '1': 'On',
+            '0': 'Off',
+          }, (v) {
+            _customSpatialAqCtrl.text = v;
+            _saveCustomProfile();
+            setState(() {});
+          }),
+          _hwDropdown('Temporal AQ (nvenc)', _customTemporalAqCtrl.text, {
+            '': 'Default',
+            '1': 'On',
+            '0': 'Off',
+          }, (v) {
+            _customTemporalAqCtrl.text = v;
+            _saveCustomProfile();
+            setState(() {});
+          }),
+          _hwDropdown('Multipass (nvenc)', _customMultipassCtrl.text, {
+            '': 'Default',
+            '0': 'Disabled',
+            '1': 'Two pass, quarter res',
+            '2': 'Two pass, full res',
+          }, (v) {
+            _customMultipassCtrl.text = v;
+            _saveCustomProfile();
+            setState(() {});
+          }),
+          _hwDropdown('Pre-analysis (amf)', _customPreanalysisCtrl.text, {
+            '': 'Default',
+            '1': 'On',
+            '0': 'Off',
+          }, (v) {
+            _customPreanalysisCtrl.text = v;
+            _saveCustomProfile();
+            setState(() {});
+          }),
           CheckboxListTile(
               dense: true,
               title: Text(translate('Allow adaptive bitrate (VideoQoS)')),
@@ -2218,7 +2271,7 @@ class _DisplayState extends State<_Display> {
                 setState(() {});
               }),
           Text(
-            translate('Note: with CQ the bitrate setting is ignored; a lower QP means better quality and more bandwidth (intra/QP per-frame control also stops VideoQoS from working well). VRAM channel only supports bitrate/fps/gop; preset and rate control only apply to the RAM hardware codec path.'),
+            translate('Note: with CQ the bitrate setting is ignored (a lower QP means better quality and more bandwidth). Quality enhancements are encoder built-in options: spatial AQ / multipass (nvenc), pre-analysis (amf); temporal AQ is not supported by every GPU - if the encoder refuses it, the session retries once with all enhancements removed. VRAM channel only supports bitrate/fps/gop, so preset / rate control / enhancements only apply to the RAM hardware codec path.'),
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
         ]).marginOnly(left: 12),

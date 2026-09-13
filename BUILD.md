@@ -171,8 +171,8 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 |---|---|---|---|---|
 | latency 低延迟 | Low (nvenc p1 / qsv veryfast / amf speed) | CBR | 默认 | 流畅优先 |
 | balanced 均衡（默认） | Default | CBR | 默认 | 与官方行为一致 |
-| quality 画质 | Medium (nvenc p4 / qsv medium / amf balanced) | VBR | 240 | 画质优先 |
-| custom 自定义 | 逐项 | 逐项 | 逐项 | 码率/QP/FPS/GOP/自适应开关 |
+| quality 画质 | Medium (nvenc p4 / qsv medium / amf balanced) | VBR | 240 | 画质优先 + nvenc spatial AQ/multipass、amf pre-analysis |
+| custom 自定义 | 逐项 | 逐项 | 逐项 | 码率/QP/FPS/GOP/画质增强/自适应开关 |
 
 - 配置存储：全局 option `hw-encode-profile`（预置档 id 或 JSON），修改后对新会话生效
 - 按客户端覆盖：PeerConfig option `hw-encode-profile`（按 peer id），
@@ -189,10 +189,24 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 | rc=VBR | ✅ | ✅（vbr_latency） | ✅ | ✅ | 不支持 |
 | rc=CQ（恒定 QP） | ✅ `rc=constqp` + `qp` | ✅ `rc=cqp` + `qp_i/p/b` | ✅ ICQ（`global_quality`） | ✅ `bitrate_mode=cq` | 不支持 |
 | QP(q) 范围 | 0-51 | 0-51 | 1-51 | 0-51 | — |
+| spatial AQ | ✅ `spatial-aq=1` | — | — | — | — |
+| temporal AQ | ✅ `temporal-aq=1`（部分 GPU 不支持） | — | — | — | — |
+| multipass | ✅ `qres` / `fullres` | — | — | — | — |
+| pre-analysis | — | ✅ `preanalysis=1` | — | — | — |
 
 - **rc=CQ 时码率设置被忽略**：QP 直接决定画质与带宽，值越小画质越好、码率越高
 - QP 越界会被忽略并记日志；会话建立时会打印一行
-  `hw encode params: name=..., quality=, rc=, q=, kbs=, fps=, gop=`，便于核对实际生效值
+  `hw encode params: name=..., quality=, rc=, q=, kbs=, fps=, gop=`
+  与 `encode enhance: ...`，便于核对实际生效值
+- **画质增强**（编码器内建能力，不需要 CPU 侧滤镜，均为可选、默认关）：
+  - nvenc：`spatial-aq`（空间自适应量化）、`temporal-aq`（时间自适应量化）、
+    `multipass`（两次编码，1/4 分辨率或全分辨率）
+  - amf：`preanalysis`（预分析）
+  - ⚠️ `temporal-aq` 在部分 GPU 上不受支持（ffmpeg 的 `NV_ENC_CAPS_SUPPORT_TEMPORAL_AQ`
+    能力检查会返回 ENOSYS），因此 hwcodec fork 在 `avcodec_open2` 失败且应用过增强项时
+    **会去掉全部增强项自动重试一次**并记日志，不会让远程会话建不起来
+  - `quality` 预置档默认开启 spatial AQ + multipass(quarter res) + pre-analysis；
+    `temporal-aq` 默认关（能力门槛），仅在「自定义」档可选
 - VRAM 通道（GPU 纹理直达）仅支持 码率/FPS/GOP。VRAM 只在 legacy linux-sciter 构建中启用
   （`--features inline,vram,hwcodec`）；Windows / macOS / Linux Flutter 构建的命令均未启用 vram，
   因此上表参数对正式产物全部生效
@@ -202,9 +216,9 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 | 依赖 | 上游 | 本仓库指向 | 原因 |
 |---|---|---|---|
 | `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
-| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `e9e3329` | 恢复 encoder preset 生效 + 新增 constant QP（CQ）码率控制 |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `9de676c` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 |
 
-hwcodec fork 的改动（`cpp/common/util.cpp`、`cpp/ffmpeg_ram/ffmpeg_ram_encode.cpp`）：
+hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`）：
 
 1. **恢复 preset 生效**：上游把 `util_encode::set_quality()` 调用注释掉了，导致 profile 的
    `preset` 字段传进 C 后完全没被使用；现已恢复（`Quality_Default` 仍是 no-op，默认行为不变）
@@ -213,5 +227,8 @@ hwcodec fork 的改动（`cpp/common/util.cpp`、`cpp/ffmpeg_ram/ffmpeg_ram_enco
    qsv ICQ（清掉 `rc_max_rate`/`bit_rate` 并设 `global_quality`）、mediacodec 保持 `bitrate_mode=cq`
 4. **qsv 支持 CBR**：上游 `set_av_codec_ctx()` 把 `bit_rate` 减 1 以走 VBR 分支，
    现按 rc=CBR 令 `bit_rate = rc_max_rate` 走真正的 `MFX_RATECONTROL_CBR`
-5. 会话建立时打印实际生效参数，便于核对
+5. **新增 `set_encode_enhance()`**（`spatial-aq`/`temporal-aq`/`multipass`/`preanalysis`）：
+   `EncodeContext` 与 `ffmpeg_ram_new_encoder()` FFI 相应扩参；该函数永不返回失败
+   （可选项不该拖垮会话），并在 `avcodec_open2` 失败且应用过增强项时去增强重试一次
+6. 会话建立时打印实际生效参数，便于核对
 

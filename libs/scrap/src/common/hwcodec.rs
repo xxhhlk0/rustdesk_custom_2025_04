@@ -118,6 +118,10 @@ impl EncoderApi for HwRamEncoder {
                     quality,
                     rc,
                     q: params.q.unwrap_or(-1),
+                    spatial_aq: params.spatial_aq.unwrap_or(false),
+                    temporal_aq: params.temporal_aq.unwrap_or(false),
+                    multipass: params.multipass.unwrap_or(0),
+                    preanalysis: params.preanalysis.unwrap_or(false),
                     thread_count: codec_thread_num(16) as _, // ffmpeg's thread_count is used for cpu
                 };
                 let format = match Encoder::format_from_name(config.name.clone()) {
@@ -729,6 +733,10 @@ pub fn check_available_hwcodec() -> String {
         quality: DEFAULT_HW_QUALITY,
         rc: RC_CBR,
         q: -1,
+        spatial_aq: false,
+        temporal_aq: false,
+        multipass: 0,
+        preanalysis: false,
         thread_count: 4,
     };
     #[cfg(feature = "vram")]

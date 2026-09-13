@@ -43,6 +43,14 @@ pub const RC_VBR: i32 = 2;
 #[allow(dead_code)]
 pub const RC_CQ: i32 = 3;
 
+/// nvenc multipass 取值
+#[allow(dead_code)]
+pub const MULTIPASS_OFF: i32 = 0;
+#[allow(dead_code)]
+pub const MULTIPASS_QUARTER: i32 = 1;
+#[allow(dead_code)]
+pub const MULTIPASS_FULL: i32 = 2;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HwEncodeProfile {
     #[serde(default = "default_id")]
@@ -66,6 +74,20 @@ pub struct HwEncodeProfile {
     /// GOP 覆盖; None = keyframe_interval / MAX_GOP (录制时 240 优先)
     #[serde(default)]
     pub gop: Option<i32>,
+    /// 画质增强 (编码器内建能力, 不额外占用 CPU; None = 保持编码器默认)
+    /// nvenc: spatial aq / temporal aq / multipass; amf: preanalysis
+    /// 0=off 1=on (与 preset/rc 一致用数值码, 便于 UI/JSON 往返)
+    #[serde(default)]
+    pub spatial_aq: Option<i32>,
+    /// nvenc temporal AQ; ⚠️ 部分 GPU 不支持, 此时 hwcodec 会去掉增强项重试一次
+    #[serde(default)]
+    pub temporal_aq: Option<i32>,
+    /// nvenc multipass: 0=off 1=two pass quarter res 2=two pass full res
+    #[serde(default)]
+    pub multipass: Option<i32>,
+    /// amf pre-analysis; 0=off 1=on
+    #[serde(default)]
+    pub preanalysis: Option<i32>,
     /// 是否允许 VideoQoS 运行期动态调整码率
     #[serde(default = "default_true")]
     pub bitrate_adaptive: bool,
@@ -89,6 +111,10 @@ impl Default for HwEncodeProfile {
             q: None,
             fps: None,
             gop: None,
+            spatial_aq: None,
+            temporal_aq: None,
+            multipass: None,
+            preanalysis: None,
             bitrate_adaptive: true,
         }
     }
@@ -133,6 +159,25 @@ impl HwEncodeProfile {
                 self.kbs = None;
             }
         }
+        if let Some(v) = self.multipass {
+            if !(0..=2).contains(&v) {
+                log::warn!("hw-encode-profile: multipass {v} 越界(0-2), 忽略");
+                self.multipass = None;
+            }
+        }
+        // 0/1 开关类增强项越界即丢弃 (multipass 上面已单独校验)
+        fn check01(v: Option<i32>, name: &str) -> Option<i32> {
+            if let Some(v) = v {
+                if !(0..=1).contains(&v) {
+                    log::warn!("hw-encode-profile: {name} {v} 越界(0-1), 忽略");
+                    return None;
+                }
+            }
+            v
+        }
+        self.spatial_aq = check01(self.spatial_aq, "spatial_aq");
+        self.temporal_aq = check01(self.temporal_aq, "temporal_aq");
+        self.preanalysis = check01(self.preanalysis, "preanalysis");
         Some(self)
     }
 }
@@ -153,6 +198,11 @@ pub fn preset(id: &str) -> Option<HwEncodeProfile> {
             preset: Some(PRESET_MEDIUM), // nvenc p4 / qsv medium / amf balanced
             rc: Some(RC_VBR),
             gop: Some(240),
+            // 零成本画质增强 (编码器内建): nvenc spatial AQ + 两次编码(1/4 分辨率),
+            // amf pre-analysis。temporal AQ 有 GPU 能力门槛, 仅自定义档可选。
+            spatial_aq: Some(1),
+            multipass: Some(MULTIPASS_QUARTER),
+            preanalysis: Some(1),
             ..Default::default()
         }),
         PRESET_CUSTOM => Some(HwEncodeProfile {
@@ -274,6 +324,10 @@ pub fn hw_params(record: bool) -> Option<scrap::codec::HwEncoderParams> {
         q: p.q,
         fps: p.fps,
         gop,
+        spatial_aq: p.spatial_aq.map(|v| v > 0),
+        temporal_aq: p.temporal_aq.map(|v| v > 0),
+        multipass: p.multipass,
+        preanalysis: p.preanalysis.map(|v| v > 0),
     })
 }
 
@@ -313,6 +367,22 @@ mod test {
         let gop_backup = parse_profile(r#"{"gop":500}"#).unwrap();
         assert_eq!(gop_backup.gop, Some(500));
         // hw_params 的 record 分支由 video_service 集成, 这里只验字段
+    }
+
+    #[test]
+    fn test_quality_preset_enhance() {
+        let p = parse_profile("quality").unwrap();
+        assert_eq!(p.spatial_aq, Some(1));
+        assert_eq!(p.multipass, Some(MULTIPASS_QUARTER));
+        assert_eq!(p.preanalysis, Some(1));
+        // temporal AQ 有 GPU 能力门槛, 默认不开 (仅自定义档可选)
+        assert_eq!(p.temporal_aq, None);
+        // 越界 multipass 丢弃
+        let p = parse_profile(r#"{"id":"custom","multipass":9}"#).unwrap();
+        assert_eq!(p.multipass, None);
+        // 越界增强开关丢弃
+        let p = parse_profile(r#"{"id":"custom","spatial_aq":5}"#).unwrap();
+        assert_eq!(p.spatial_aq, None);
     }
 
     #[test]

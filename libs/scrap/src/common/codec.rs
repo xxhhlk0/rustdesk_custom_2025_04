@@ -65,6 +65,11 @@ pub enum EncoderCfg {
 ///           nvenc rc=constqp+qp, amf rc=cqp+qp_i|p|b, qsv ICQ, mediacodec bitrate_mode=cq)
 /// - kbs:    None = 按 base_bitrate×ratio 自动推导; rc=CQ 时被忽略
 /// - fps/gop/q: None = 沿用内置默认 (30 / keyframe_interval / -1)
+/// - 画质增强 (编码器内建能力, 不额外占用 CPU; None = 不设置, 保持编码器默认):
+///   spatial_aq/temporal_aq/multipass 仅 nvenc, preanalysis 仅 amf;
+///   multipass: 1 = two pass quarter res, 2 = two pass full res。
+///   注: temporal AQ 在部分 GPU 上不受支持, hwcodec 会在编码器初始化失败时
+///   自动去掉增强项重试一次。
 /// 注意: VRAM 通道仅支持 kbs/fps/gop (preset/rc 由 hwcodec C 库写死, 此处忽略)。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HwEncoderParams {
@@ -74,6 +79,10 @@ pub struct HwEncoderParams {
     pub q: Option<i32>,
     pub fps: Option<i32>,
     pub gop: Option<i32>,
+    pub spatial_aq: Option<bool>,
+    pub temporal_aq: Option<bool>,
+    pub multipass: Option<i32>,
+    pub preanalysis: Option<bool>,
 }
 
 pub trait EncoderApi {

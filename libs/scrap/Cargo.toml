@@ -60,10 +60,10 @@ gstreamer-video = { version = "0.16", optional = true }
 zbus = { version = "3.15", optional = true }
 
 [dependencies.hwcodec]
-# fork: 恢复 encoder preset 的实际生效 + 新增 constant QP (CQ) 码率控制
-# (nvenc constqp+qp / amf cqp+qp_i|p|b / qsv ICQ / qsv CBR)
+# fork: 恢复 encoder preset 生效 + constant QP (CQ) 码率控制 + 可选画质增强
+# (nvenc constqp+qp / amf cqp+qp_i|p|b / qsv ICQ+CBR / spatial AQ / multipass / preanalysis)
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "e9e332962d646ac5d38fe31bc9922af5c4969dc6"
+rev = "9de676ce25aa854272632769a7a7298d5fd03c3c"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
