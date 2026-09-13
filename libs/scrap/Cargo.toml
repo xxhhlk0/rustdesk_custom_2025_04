@@ -63,7 +63,7 @@ zbus = { version = "3.15", optional = true }
 # fork: 恢复 encoder preset 生效 + constant QP (CQ) 码率控制 + 可选画质增强
 # (nvenc constqp+qp / amf cqp+qp_i|p|b / qsv ICQ+CBR / spatial AQ / multipass / preanalysis)
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "9de676ce25aa854272632769a7a7298d5fd03c3c"
+rev = "9e91d81a4e306a3a83fea194442fc088362d24d4"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]

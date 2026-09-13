@@ -216,7 +216,7 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 | 依赖 | 上游 | 本仓库指向 | 原因 |
 |---|---|---|---|
 | `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
-| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `9de676c` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `9e91d81` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 |
 
 hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`）：
 
