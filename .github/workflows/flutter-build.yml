@@ -2199,6 +2199,11 @@ jobs:
           command: |
             sudo apt-get update -y
             sudo apt-get install -y libarchive-tools libfuse2
+            # appimage-builder 的 setup.py 走 setup_requires 拉取 setuptools_scm；
+            # runner (ubuntu-22.04) 的 setuptools 较旧，setuptools_scm>=10 在 egg_info
+            # 阶段会因 ignore_egg_info_in_manifest 属性缺失而报 AttributeError。
+            # 先装 <10 让已安装发行版满足依赖, 避免 easy_install 拉最新版。
+            sudo pip3 install "setuptools_scm<10"
             sudo pip3 install git+https://github.com/rustdesk-org/appimage-builder.git
 
       - name: Build appimage package
