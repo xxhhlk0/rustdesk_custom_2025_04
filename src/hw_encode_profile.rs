@@ -264,7 +264,7 @@ pub fn bitrate_adaptive() -> bool {
 pub fn hw_params(record: bool) -> Option<scrap::codec::HwEncoderParams> {
     let p = active_profile()?;
     let gop = if record { None } else { p.gop };
-    Some(scrap::hwcodec::HwEncoderParams {
+    Some(scrap::codec::HwEncoderParams {
         preset: p.preset,
         rc: p.rc,
         kbs: p.kbs,

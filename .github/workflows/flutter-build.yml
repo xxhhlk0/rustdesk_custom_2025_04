@@ -197,6 +197,8 @@ jobs:
           Move-Item -Force $engineZipTmp windows-x64-release.zip
 
       - name: Install custom flutter engine
+        # x64 only: see "Replace engine with rustdesk custom flutter engine" above.
+        if: ${{ matrix.job.arch == 'x86_64' }}
         run: |
           Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
           mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
@@ -448,6 +450,17 @@ jobs:
         uses: rustdesk-org/install-llvm-action-32bit@6aa7d9ad3df84dff01cd4596dd0fc880a7f47fce # no release tag; commit 2026-05-26
         with:
           version: ${{ env.LLVM_VERSION }}
+
+      - name: Pre-install non-host Rust toolchain (i686 on x64 runner)
+        # rustup >= 1.28 refuses to install a toolchain whose host triple differs from the
+        # machine without --force-non-host. The sciter i686 build relies on the host toolchain
+        # being i686 (no --target in cargo build), so pre-install it with the flag; the
+        # dtolnay/rust-toolchain step below then just sets default + components.
+        if: matrix.job.target == 'i686-pc-windows-msvc'
+        shell: bash
+        run: |
+          rustup toolchain install nightly-2023-10-13-i686-pc-windows-msvc --force-non-host --profile minimal --no-self-update
+          rustup default nightly-2023-10-13-i686-pc-windows-msvc
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -1170,7 +1183,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/ ./src/ \
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
             --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
             --region auto
           mv ./src/generated_bridge.dart ./flutter/lib/
@@ -1586,7 +1599,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.job.target }}
@@ -1603,11 +1615,10 @@ jobs:
           sed -i  "s/\[\"cdylib\", \"staticlib\", \"rlib\"\]/\[\"cdylib\"\]/g" Cargo.toml
 
       - name: Restore bridge files from R2
-        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         shell: bash
         run: |
           mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/ ./src/ \
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
             --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
             --region auto
           mv ./src/generated_bridge.dart ./flutter/lib/
@@ -1619,7 +1630,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Setup vcpkg with retry
-        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 30
@@ -1662,11 +1672,10 @@ jobs:
         shell: bash
 
       - name: Restore bridge files from R2
-        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         shell: bash
         run: |
           mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/ ./src/ \
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
             --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
             --region auto
           mv ./src/generated_bridge.dart ./flutter/lib/
@@ -1884,7 +1893,7 @@ jobs:
           fi
 
       - name: Build archlinux package
-        if: matrix.job.arch == 'x86_64' && env.UPLOAD_ARTIFACT == 'true'
+        if: matrix.job.arch == 'x86_64'
         uses: rustdesk-org/arch-makepkg-action@04200739ed1d0bf6f2188b6736b26a767c57a7f9 # no release tag; commit 2026-05-26
         with:
           packages:
