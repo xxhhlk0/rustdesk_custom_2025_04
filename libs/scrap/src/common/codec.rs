@@ -59,9 +59,11 @@ pub enum EncoderCfg {
 
 /// 用户可选的硬件编码参数 (来自编码 profile, 详见 rustdesk 侧 hw_encode_profile 模块)。
 /// 数值语义与 hwcodec 的 Quality / RateControl 枚举一一对应:
-/// - preset: 0=Default 1=High 2=Medium 3=Low (nvenc p1/p4, qsv veryfast/medium/veryslow, amf speed/balanced/quality)
-/// - rc:     0=DEFAULT 1=CBR 2=VBR 3=CQ(CQ 仅 mediacodec 生效, 配合 q)
-/// - kbs:    None = 按 base_bitrate×ratio 自动推导
+/// - preset: 0=Default 1=High 2=Medium 3=Low
+///           (nvenc p7/p4/p1, qsv veryslow/medium/veryfast, amf quality/balanced/speed)
+/// - rc:     0=DEFAULT 1=CBR 2=VBR 3=CQ / 恒定 QP (配合 q;
+///           nvenc rc=constqp+qp, amf rc=cqp+qp_i|p|b, qsv ICQ, mediacodec bitrate_mode=cq)
+/// - kbs:    None = 按 base_bitrate×ratio 自动推导; rc=CQ 时被忽略
 /// - fps/gop/q: None = 沿用内置默认 (30 / keyframe_interval / -1)
 /// 注意: VRAM 通道仅支持 kbs/fps/gop (preset/rc 由 hwcodec C 库写死, 此处忽略)。
 #[derive(Debug, Clone, Default, PartialEq)]

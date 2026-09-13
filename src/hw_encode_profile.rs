@@ -38,8 +38,10 @@ pub const RC_DEFAULT: i32 = 0;
 pub const RC_CBR: i32 = 1;
 #[allow(dead_code)]
 pub const RC_VBR: i32 = 2;
+/// 恒定 QP: nvenc rc=constqp+qp / amf rc=cqp+qp_i|p|b / qsv ICQ / mediacodec bitrate_mode=cq
+/// (仅 ffmpeg 硬编通道; VRAM 通道未接 rc)
 #[allow(dead_code)]
-pub const RC_CQ: i32 = 3; // 仅 mediacodec 生效
+pub const RC_CQ: i32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HwEncodeProfile {
@@ -54,7 +56,8 @@ pub struct HwEncodeProfile {
     /// 固定码率 kbps; None = 自动 (base_bitrate × ratio)
     #[serde(default)]
     pub kbs: Option<u32>,
-    /// QP; 仅 rc=CQ (mediacodec) 时生效, 0-51
+    /// QP; rc=CQ 时生效 (nvenc/amf/qsv/mediacodec), 0-51 (qsv 取 1-51);
+    /// 值越小画质越好、码率越高
     #[serde(default)]
     pub q: Option<i32>,
     /// 编码器侧 fps 覆盖; None = 30
@@ -310,5 +313,20 @@ mod test {
         let gop_backup = parse_profile(r#"{"gop":500}"#).unwrap();
         assert_eq!(gop_backup.gop, Some(500));
         // hw_params 的 record 分支由 video_service 集成, 这里只验字段
+    }
+
+    #[test]
+    fn test_cq_profile() {
+        // CQ / 恒定 QP: nvenc/amf/qsv 也支持 (依赖 hwcodec fork)
+        let p = parse_profile(r#"{"id":"custom","rc":3,"q":23}"#).unwrap();
+        assert_eq!(p.rc, Some(RC_CQ));
+        assert_eq!(p.q, Some(23));
+        // q 越界丢弃
+        let p = parse_profile(r#"{"id":"custom","rc":3,"q":60}"#).unwrap();
+        assert_eq!(p.q, None);
+        assert_eq!(p.rc, Some(RC_CQ));
+        // rc 越界丢弃
+        let p = parse_profile(r#"{"id":"custom","rc":9}"#).unwrap();
+        assert_eq!(p.rc, None);
     }
 }

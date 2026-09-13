@@ -179,5 +179,39 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
   最近连接的带覆盖客户端生效，其断开后回落全局默认
 - `bitrate_adaptive=false` 时抑制 VideoQoS 运行期动态码率调整
 - 录制会话的 240 帧关键帧间隔优先于 profile 的 GOP 覆盖
-- VRAM 通道（GPU 纹理直达）仅支持 码率/FPS/GOP；preset 与 rc 仅作用于 RAM 硬编路径
-  （hwcodec C 库写死）
+
+**各编码器实际生效矩阵**（依赖下方 §3 的 hwcodec fork）
+
+| 参数 | nvenc | amf | qsv | mediacodec | VRAM 通道 |
+|---|---|---|---|---|---|
+| preset | p1 / p4 / p7 | speed / balanced / quality | veryfast / medium / veryslow | 仅 level | 不支持（SDK 内写死） |
+| rc=CBR | ✅ | ✅ | ✅ | ✅ | 不支持（固定 CBR） |
+| rc=VBR | ✅ | ✅（vbr_latency） | ✅ | ✅ | 不支持 |
+| rc=CQ（恒定 QP） | ✅ `rc=constqp` + `qp` | ✅ `rc=cqp` + `qp_i/p/b` | ✅ ICQ（`global_quality`） | ✅ `bitrate_mode=cq` | 不支持 |
+| QP(q) 范围 | 0-51 | 0-51 | 1-51 | 0-51 | — |
+
+- **rc=CQ 时码率设置被忽略**：QP 直接决定画质与带宽，值越小画质越好、码率越高
+- QP 越界会被忽略并记日志；会话建立时会打印一行
+  `hw encode params: name=..., quality=, rc=, q=, kbs=, fps=, gop=`，便于核对实际生效值
+- VRAM 通道（GPU 纹理直达）仅支持 码率/FPS/GOP。VRAM 只在 legacy linux-sciter 构建中启用
+  （`--features inline,vram,hwcodec`）；Windows / macOS / Linux Flutter 构建的命令均未启用 vram，
+  因此上表参数对正式产物全部生效
+
+### 3. 依赖的 fork
+
+| 依赖 | 上游 | 本仓库指向 | 原因 |
+|---|---|---|---|
+| `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `e9e3329` | 恢复 encoder preset 生效 + 新增 constant QP（CQ）码率控制 |
+
+hwcodec fork 的改动（`cpp/common/util.cpp`、`cpp/ffmpeg_ram/ffmpeg_ram_encode.cpp`）：
+
+1. **恢复 preset 生效**：上游把 `util_encode::set_quality()` 调用注释掉了，导致 profile 的
+   `preset` 字段传进 C 后完全没被使用；现已恢复（`Quality_Default` 仍是 no-op，默认行为不变）
+2. **nvenc 补 `Quality_High → preset p7`**：上游只映射了 Medium→p4、Low→p1，选 High 在 N 卡上无任何效果
+3. **新增 constant QP（CQ）**：nvenc `rc=constqp`+`qp`、amf `rc=cqp`+`qp_i/qp_p/qp_b`、
+   qsv ICQ（清掉 `rc_max_rate`/`bit_rate` 并设 `global_quality`）、mediacodec 保持 `bitrate_mode=cq`
+4. **qsv 支持 CBR**：上游 `set_av_codec_ctx()` 把 `bit_rate` 减 1 以走 VBR 分支，
+   现按 rc=CBR 令 `bit_rate = rc_max_rate` 走真正的 `MFX_RATECONTROL_CBR`
+5. 会话建立时打印实际生效参数，便于核对
+

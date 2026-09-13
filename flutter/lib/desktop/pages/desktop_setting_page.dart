@@ -2164,7 +2164,7 @@ class _DisplayState extends State<_Display> {
       _Radio(context,
           value: 'latency',
           groupValue: sel,
-          label: 'Low latency (preset p1, CBR)',
+          label: 'Low latency (preset Low, CBR)',
           onChanged: (v) => _saveHwProfile(v)),
       _Radio(context,
           value: 'balanced',
@@ -2174,7 +2174,7 @@ class _DisplayState extends State<_Display> {
       _Radio(context,
           value: 'quality',
           groupValue: sel,
-          label: 'Quality first (preset p4, VBR)',
+          label: 'Quality first (preset Medium, VBR, GOP 240)',
           onChanged: (v) => _saveHwProfile(v)),
       _Radio(context,
           value: 'custom',
@@ -2186,19 +2186,19 @@ class _DisplayState extends State<_Display> {
           Divider(),
           _hwDropdown('Encoder preset', _customPresetCtrl.text.isEmpty ? '0' : _customPresetCtrl.text, {
             '0': 'Default',
-            '1': 'High',
-            '2': 'Medium',
-            '3': 'Low',
+            '1': 'High (nvenc p7 / amf quality / qsv veryslow)',
+            '2': 'Medium (nvenc p4 / amf balanced / qsv medium)',
+            '3': 'Low (nvenc p1 / amf speed / qsv veryfast)',
           }, (v) {
             _customPresetCtrl.text = v;
             _saveCustomProfile();
             setState(() {});
           }),
           _hwDropdown('Rate control', _customRcCtrl.text.isEmpty ? '0' : _customRcCtrl.text, {
-            '0': 'Default (CBR)',
+            '0': 'Default',
             '1': 'CBR',
             '2': 'VBR',
-            '3': 'CQ (mediacodec only)',
+            '3': 'CQ / constant QP (nvenc/amf/qsv/mediacodec)',
           }, (v) {
             _customRcCtrl.text = v;
             _saveCustomProfile();
@@ -2218,7 +2218,7 @@ class _DisplayState extends State<_Display> {
                 setState(() {});
               }),
           Text(
-            translate('Note: VRAM channel only supports bitrate/fps/gop; preset and rate control only apply to the RAM hardware codec path.'),
+            translate('Note: with CQ the bitrate setting is ignored; a lower QP means better quality and more bandwidth (intra/QP per-frame control also stops VideoQoS from working well). VRAM channel only supports bitrate/fps/gop; preset and rate control only apply to the RAM hardware codec path.'),
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
         ]).marginOnly(left: 12),
