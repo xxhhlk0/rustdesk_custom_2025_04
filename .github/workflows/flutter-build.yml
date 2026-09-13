@@ -452,18 +452,22 @@ jobs:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Pre-install non-host Rust toolchain (i686 on x64 runner)
-        # rustup >= 1.28 refuses to install a toolchain whose host triple differs from the
-        # machine without --force-non-host. The sciter i686 build relies on the host toolchain
-        # being i686 (no --target in cargo build), so pre-install it with the flag; the
-        # dtolnay/rust-toolchain step below then just sets default + components.
+        # rustup >= 1.28 refuses to install or set as default a toolchain whose host triple
+        # differs from the machine without --force-non-host (`rustup default` has no such
+        # flag and still refuses). The sciter i686 build relies on the host toolchain being
+        # i686 (no --target in cargo build), so: force-install it, then point every rustup
+        # proxy at it via RUSTUP_TOOLCHAIN instead of `rustup default`. The dtolnay step
+        # below is skipped for i686 because it would run the refusing `rustup default`.
         if: matrix.job.target == 'i686-pc-windows-msvc'
         shell: bash
         run: |
           rustup toolchain install nightly-2023-10-13-i686-pc-windows-msvc --force-non-host --profile minimal --no-self-update
-          rustup default nightly-2023-10-13-i686-pc-windows-msvc
+          rustup component add rustfmt --toolchain nightly-2023-10-13-i686-pc-windows-msvc || true
+          echo "RUSTUP_TOOLCHAIN=nightly-2023-10-13-i686-pc-windows-msvc" >> $GITHUB_ENV
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        if: matrix.job.target != 'i686-pc-windows-msvc'
         with:
           toolchain: nightly-2023-10-13-${{ matrix.job.target }} # must use nightly here, because of abi_thiscall feature required
           targets: ${{ matrix.job.target }}

@@ -2019,7 +2019,7 @@ class _DisplayState extends State<_Display> {
   }
 
   String _hwSelected() {
-    final v = bind.mainGetOption(key: kOptionHwEncodeProfile);
+    final v = bind.mainGetOptionSync(key: kOptionHwEncodeProfile);
     if (v.startsWith('{')) return 'custom';
     if (v.isEmpty) return 'balanced';
     return v;
@@ -2028,7 +2028,7 @@ class _DisplayState extends State<_Display> {
   void _loadCustomFields() {
     if (_hwCustomLoaded != null) return;
     _hwCustomLoaded = true;
-    final v = bind.mainGetOption(key: kOptionHwEncodeProfile);
+    final v = bind.mainGetOptionSync(key: kOptionHwEncodeProfile);
     if (v.startsWith('{')) {
       try {
         final map = jsonDecode(v) as Map<String, dynamic>;
@@ -2072,7 +2072,7 @@ class _DisplayState extends State<_Display> {
   }
 
   List<String> _hwOverridePeers() {
-    final v = bind.mainGetOption(key: kOptionHwEncodeProfilePeers);
+    final v = bind.mainGetOptionSync(key: kOptionHwEncodeProfilePeers);
     return v.split(',').where((e) => e.trim().isNotEmpty).map((e) => e.trim()).toList();
   }
 
@@ -2227,7 +2227,7 @@ class _DisplayState extends State<_Display> {
               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500))
           .marginOnly(bottom: 6),
       ...peers.map((pid) {
-        final v = bind.mainGetPeerOption(id: pid, key: kOptionHwEncodeProfile);
+        final v = bind.mainGetPeerOptionSync(id: pid, key: kOptionHwEncodeProfile);
         return Row(children: [
           Expanded(child: Text(pid, style: const TextStyle(fontSize: 13))),
           Text(_hwPeerLabel(v), style: const TextStyle(fontSize: 13, color: Colors.grey)),
