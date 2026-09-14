@@ -240,25 +240,31 @@ jobs:
           doNotCache: false
 
       - name: Install vcpkg dependencies
+        # googlesource.com (aom/libyuv 等 port 源) 偶发 HTTP 502, 带重试
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
           USE_AOM_391: 1
-        run: |
-          if ! $VCPKG_ROOT/vcpkg \
-            install \
-            --triplet ${{ matrix.job.vcpkg-triplet }} \
-            --x-install-root="$VCPKG_ROOT/installed"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-              echo "$_1:"
-              echo "======"
-              cat "$_1"
-              echo "======"
-              echo ""
-            done
-            exit 1
-          fi
-          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
-        shell: bash
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 180
+          max_attempts: 3
+          retry_wait_seconds: 120
+          shell: bash
+          command: |
+            if ! $VCPKG_ROOT/vcpkg \
+              install \
+              --triplet ${{ matrix.job.vcpkg-triplet }} \
+              --x-install-root="$VCPKG_ROOT/installed"; then
+              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+                echo "$_1:"
+                echo "======"
+                cat "$_1"
+                echo "======"
+                echo ""
+              done
+              exit 1
+            fi
+            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
 
       - name: Set SODIUM_LIB_DIR (arm64)
         # libsodium-sys ships no arm64 Windows prebuilt lib; point it at the vcpkg-built one
@@ -266,6 +272,18 @@ jobs:
         if: ${{ matrix.job.arch == 'aarch64' }}
         shell: bash
         run: echo "SODIUM_LIB_DIR=$VCPKG_ROOT/installed/${{ matrix.job.vcpkg-triplet }}/lib" >> "$GITHUB_ENV"
+
+      - name: Prefetch cargo dependencies with retry
+        # cargo 的 git 依赖 (如 rust-webm 的 libwebm 子模块, 指向 chromium.googlesource.com)
+        # 偶发 HTTP 502 会直接让 build.py 里的 cargo build 失败; 先带重试地 fetch 预热,
+        # 之后 cargo build 直接命中本地 checkout, 不再需要联网
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 20
+          max_attempts: 3
+          retry_wait_seconds: 60
+          shell: bash
+          command: cargo fetch --locked
 
       - name: Build rustdesk
         run: |
@@ -508,6 +526,16 @@ jobs:
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
 
+      - name: Prefetch cargo dependencies with retry
+        # cargo 的 git 依赖 (libwebm 子模块指向 chromium.googlesource.com) 偶发 502, 带重试预热
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 20
+          max_attempts: 3
+          retry_wait_seconds: 60
+          shell: bash
+          command: cargo fetch --locked
+
       - name: Build rustdesk
         id: build
         shell: bash
@@ -659,22 +687,31 @@ jobs:
             rm -rf "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" || true
 
       - name: Install vcpkg dependencies
-        run: |
-          if ! $VCPKG_ROOT/vcpkg \
-            install \
-            --triplet ${{ matrix.job.vcpkg-triplet }} \
-            --x-install-root="$VCPKG_ROOT/installed"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-              echo "$_1:"
-              echo "======"
-              cat "$_1"
-              echo "======"
-              echo ""
-            done
-            exit 1
-          fi
-          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
-        shell: bash
+        # googlesource.com (aom/libyuv 等 port 源) 偶发 HTTP 502, 带重试
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 180
+          max_attempts: 3
+          retry_wait_seconds: 120
+          shell: bash
+          command: |
+            if ! $VCPKG_ROOT/vcpkg \
+              install \
+              --triplet ${{ matrix.job.vcpkg-triplet }} \
+              --x-install-root="$VCPKG_ROOT/installed"; then
+              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+                echo "$_1:"
+                echo "======"
+                cat "$_1"
+                echo "======"
+                echo ""
+              done
+              exit 1
+            fi
+            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+          on_retry_command: |
+            echo "Retrying vcpkg install, cleaning up..."
+            rm -rf "${VCPKG_ROOT}/buildtrees" "${VCPKG_ROOT}/packages" || true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -916,20 +953,29 @@ jobs:
             rm -rf "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" || true
 
       - name: Install vcpkg dependencies
-        run: |
-          if ! $VCPKG_ROOT/vcpkg \
-            install \
-            --x-install-root="$VCPKG_ROOT/installed"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-              echo "$_1:"
-              echo "======"
-              cat "$_1"
-              echo "======"
-              echo ""
-            done
-            exit 1
-          fi
-          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+        # googlesource.com (libyuv 等 port 源) 偶发 HTTP 502, 带重试
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 180
+          max_attempts: 3
+          retry_wait_seconds: 120
+          command: |
+            if ! $VCPKG_ROOT/vcpkg \
+              install \
+              --x-install-root="$VCPKG_ROOT/installed"; then
+              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+                echo "$_1:"
+                echo "======"
+                cat "$_1"
+                echo "======"
+                echo ""
+              done
+              exit 1
+            fi
+            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+          on_retry_command: |
+            echo "Retrying vcpkg install, cleaning up..."
+            rm -rf "${VCPKG_ROOT}/buildtrees" "${VCPKG_ROOT}/packages" || true
 
       - name: Show version information (Rust, cargo, Clang)
         shell: bash
@@ -940,6 +986,16 @@ jobs:
           rustup default
           cargo -V
           rustc -V
+
+      - name: Prefetch cargo dependencies with retry
+        # cargo 的 git 依赖 (libwebm 子模块指向 chromium.googlesource.com) 偶发 502, 带重试预热
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 20
+          max_attempts: 3
+          retry_wait_seconds: 60
+          shell: bash
+          command: cargo fetch --locked
 
       - name: Build rustdesk
         run: |
@@ -1657,22 +1713,31 @@ jobs:
         run: echo "VCPKG_ROOT=/opt/artifacts/vcpkg" >> $GITHUB_ENV
 
       - name: Install vcpkg dependencies
-        run: |
-          sudo apt install -y libva-dev && apt show libva-dev
-          if ! $VCPKG_ROOT/vcpkg \
-            install \
-            --triplet ${{ matrix.job.vcpkg-triplet }} \
-            --x-install-root="$VCPKG_ROOT/installed"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-              echo "$_1:"
-              echo "======"
-              cat "$_1"
-              echo "======"
-              echo ""
-            done
-            exit 1
-          fi
-          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+        # googlesource.com (aom/libyuv 等 port 源) 偶发 HTTP 502, 带重试
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 180
+          max_attempts: 3
+          retry_wait_seconds: 120
+          command: |
+            sudo apt install -y libva-dev && apt show libva-dev
+            if ! $VCPKG_ROOT/vcpkg \
+              install \
+              --triplet ${{ matrix.job.vcpkg-triplet }} \
+              --x-install-root="$VCPKG_ROOT/installed"; then
+              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+                echo "$_1:"
+                echo "======"
+                cat "$_1"
+                echo "======"
+                echo ""
+              done
+              exit 1
+            fi
+            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+          on_retry_command: |
+            echo "Retrying vcpkg install, cleaning up..."
+            rm -rf "${VCPKG_ROOT}/buildtrees" "${VCPKG_ROOT}/packages" || true
         shell: bash
 
       - name: Restore bridge files from R2
@@ -1771,6 +1836,13 @@ jobs:
               export JOBS=""
             fi
             echo $JOBS
+            # cargo 的 git 依赖 (libwebm 子模块指向 googlesource.com) 偶发 HTTP 502, 带重试预热
+            for i in 1 2 3; do
+              if cargo fetch --locked; then break; fi
+              if [ "$i" = 3 ]; then echo "cargo fetch failed after 3 attempts"; exit 1; fi
+              echo "cargo fetch failed (attempt $i), retrying in 60s..."
+              sleep 60
+            done
             cargo build --locked --lib $JOBS --features hwcodec,flutter,unix-file-copy-paste --release
             rm -rf target/release/deps target/release/build
             rm -rf ~/.cargo
@@ -2110,6 +2182,13 @@ jobs:
             # build rustdesk
             python3 ./res/inline-sciter.py
             export CARGO_INCREMENTAL=0
+            # cargo 的 git 依赖 (libwebm 子模块指向 googlesource.com) 偶发 HTTP 502, 带重试预热
+            for i in 1 2 3; do
+              if cargo fetch --locked; then break; fi
+              if [ "$i" = 3 ]; then echo "cargo fetch failed after 3 attempts"; exit 1; fi
+              echo "cargo fetch failed (attempt $i), retrying in 60s..."
+              sleep 60
+            done
             cargo build --locked --features inline${{ matrix.job.extra_features }} --release --bins --jobs 1
             # make debian package
             mkdir -p ./Release
