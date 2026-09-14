@@ -1738,7 +1738,7 @@ jobs:
           on_retry_command: |
             echo "Retrying vcpkg install, cleaning up..."
             rm -rf "${VCPKG_ROOT}/buildtrees" "${VCPKG_ROOT}/packages" || true
-        shell: bash
+          shell: bash
 
       - name: Restore bridge files from R2
         shell: bash
