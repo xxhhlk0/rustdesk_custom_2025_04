@@ -208,6 +208,10 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
   - `quality` 预置档默认开启 spatial AQ + multipass(quarter res) + pre-analysis；
     `temporal-aq` 默认关（能力门槛），仅在「自定义」档可选
 - VRAM 通道（GPU 纹理直达）仅支持 码率/FPS/GOP。VRAM 只在 legacy linux-sciter 构建中启用
+- **禁用 VRAM**：profile 自定义档可勾选 `disable_vram`（设置页"强制 RAM 硬编"），
+  被控端视频服务启动时对显示器调 `VRamEncoder::set_not_use(monitor, true)`，
+  编码协商回落 RAM 通道，preset/rc/QP/AQ 全参数生效；服务停止时自动恢复。
+  代价：GPU 纹理多一次回读到内存，延迟略增
   （`--features inline,vram,hwcodec`）；Windows / macOS / Linux Flutter 构建的命令均未启用 vram，
   因此上表参数对正式产物全部生效
 

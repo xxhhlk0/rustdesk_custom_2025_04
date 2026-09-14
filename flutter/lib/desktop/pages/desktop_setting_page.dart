@@ -2003,6 +2003,7 @@ class _DisplayState extends State<_Display> {
   final _customFpsCtrl = TextEditingController();
   final _customGopCtrl = TextEditingController();
   bool _customAdaptive = true;
+  bool _customDisableVram = false;
   final _customSpatialAqCtrl = TextEditingController();
   final _customTemporalAqCtrl = TextEditingController();
   final _customMultipassCtrl = TextEditingController();
@@ -2052,6 +2053,7 @@ class _DisplayState extends State<_Display> {
         _customMultipassCtrl.text = s(map['multipass']);
         _customPreanalysisCtrl.text = s(map['preanalysis']);
         _customAdaptive = map['bitrate_adaptive'] != false;
+        _customDisableVram = map['disable_vram'] == true;
       } catch (e) {
         debugPrint('failed to parse hw-encode-profile: $e');
       }
@@ -2083,6 +2085,7 @@ class _DisplayState extends State<_Display> {
       'multipass': _hwParseInt(_customMultipassCtrl.text),
       'preanalysis': _hwParseInt(_customPreanalysisCtrl.text),
       'bitrate_adaptive': _customAdaptive,
+      'disable_vram': _customDisableVram,
     };
     return jsonEncode(map);
   }
@@ -2267,6 +2270,19 @@ class _DisplayState extends State<_Display> {
               value: _customAdaptive,
               onChanged: (v) {
                 _customAdaptive = v ?? true;
+                _saveCustomProfile();
+                setState(() {});
+              }),
+          CheckboxListTile(
+              dense: true,
+              title: Text(translate(
+                  'Force RAM hardware encoder (disable VRAM texture path)')),
+              subtitle: Text(
+                  translate('Required for preset / rate control / QP / quality enhancements to take effect. Slightly higher latency due to GPU texture readback.'),
+                  style: const TextStyle(fontSize: 12)),
+              value: _customDisableVram,
+              onChanged: (v) {
+                _customDisableVram = v ?? false;
                 _saveCustomProfile();
                 setState(() {});
               }),

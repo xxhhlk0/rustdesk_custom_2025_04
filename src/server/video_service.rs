@@ -908,6 +908,14 @@ impl Raii {
     fn new(display_idx: usize, name: String) -> Self {
         log::info!("new video service: {}", name);
         VIDEO_QOS.lock().unwrap().new_display(name.clone());
+        // hw-encode-profile: disable_vram=true 时禁用 VRAM 编码通道,
+        // 强制走 RAM 硬编通道 (preset/rc/QP/AQ 仅 RAM 通道支持)。
+        // try_vram 保持 true, Drop 时会自动恢复 set_not_use(false)。
+        #[cfg(feature = "vram")]
+        if crate::hw_encode_profile::disable_vram() {
+            log::info!("disable vram encode by hw-encode-profile");
+            VRamEncoder::set_not_use(name.clone(), true);
+        }
         Raii {
             display_idx,
             name,

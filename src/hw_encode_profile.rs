@@ -91,6 +91,11 @@ pub struct HwEncodeProfile {
     /// 是否允许 VideoQoS 运行期动态调整码率
     #[serde(default = "default_true")]
     pub bitrate_adaptive: bool,
+    /// 禁用 VRAM(GPU 纹理直达)编码通道, 强制走 RAM 硬编通道。
+    /// VRAM 通道只支持 fps/码率/GOP; preset/rc/QP/AQ 等参数仅 RAM 通道生效,
+    /// 需要全参数生效时打开此开关 (代价: 多一次 GPU->CPU 纹理回读)。
+    #[serde(default)]
+    pub disable_vram: bool,
 }
 
 fn default_id() -> String {
@@ -116,6 +121,7 @@ impl Default for HwEncodeProfile {
             multipass: None,
             preanalysis: None,
             bitrate_adaptive: true,
+            disable_vram: false,
         }
     }
 }
@@ -311,6 +317,12 @@ pub fn bitrate_adaptive() -> bool {
     active_profile().map(|p| p.bitrate_adaptive).unwrap_or(true)
 }
 
+/// 当前是否禁用 VRAM 编码通道 (默认不禁用)
+#[cfg_attr(not(feature = "vram"), allow(dead_code))]
+pub fn disable_vram() -> bool {
+    active_profile().map(|p| p.disable_vram).unwrap_or(false)
+}
+
 /// 转换为 scrap 编码器参数; record=true 时 gop 覆盖让位给录制用的 240 帧关键帧间隔。
 /// VRAM 通道仅支持 kbs/fps/gop (preset/rc 由 C 库写死)。
 #[cfg(feature = "hwcodec")]
@@ -398,5 +410,17 @@ mod test {
         // rc 越界丢弃
         let p = parse_profile(r#"{"id":"custom","rc":9}"#).unwrap();
         assert_eq!(p.rc, None);
+    }
+
+    #[test]
+    fn test_disable_vram() {
+        // 默认不禁用
+        assert!(!parse_profile("latency").unwrap().disable_vram);
+        // JSON 可开启
+        let p = parse_profile(r#"{"id":"custom","disable_vram":true}"#).unwrap();
+        assert!(p.disable_vram);
+        // 缺省为 false
+        let p = parse_profile(r#"{"id":"custom","fps":60}"#).unwrap();
+        assert!(!p.disable_vram);
     }
 }
