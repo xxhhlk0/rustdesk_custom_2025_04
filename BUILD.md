@@ -178,6 +178,10 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 - 按客户端覆盖：PeerConfig option `hw-encode-profile`（按 peer id），
   最近连接的带覆盖客户端生效，其断开后回落全局默认
 - `bitrate_adaptive=false` 时抑制 VideoQoS 运行期动态码率调整
+- **`pin_fps=true` 时才真正固定串流帧率**：profile 的 `fps` 字段只是声明编码器帧率，
+  实际出帧节奏由 VideoQoS 决定（会话开始为 `INIT_FPS=15`，随网络延迟逐步爬升，
+  上限取控制端请求的 `custom_fps`，延迟升高时主动降帧）。打开 `pin_fps` 后直接用
+  `fps` 作帧间隔，忽略该自适应（拥塞时表现为卡顿而非自动降帧）
 - 录制会话的 240 帧关键帧间隔优先于 profile 的 GOP 覆盖
 
 **各编码器实际生效矩阵**（依赖下方 §3 的 hwcodec fork）
@@ -195,9 +199,17 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 | pre-analysis | — | ✅ `preanalysis=1` | — | — | — |
 
 - **rc=CQ 时码率设置被忽略**：QP 直接决定画质与带宽，值越小画质越好、码率越高
-- QP 越界会被忽略并记日志；会话建立时会打印一行
-  `hw encode params: name=..., quality=, rc=, q=, kbs=, fps=, gop=`
-  与 `encode enhance: ...`，便于核对实际生效值
+- QP 越界会被忽略并记日志；会话建立时会打印（便于核对实际生效值）：
+  - `hw encode params: name=..., quality=, rc=, q=, kbs=, fps=, gop=, bit_rate=, rc_max_rate=, global_quality=`
+  - `hw encode opened: name=..., bit_rate=, rc_max_rate=, global_quality=`
+    （`avcodec_open2` 之后 ffmpeg 才真正选定码控模式，**以这一行为准**）
+  - `qsv rate control: ICQ(global_quality=20)`；
+    若请求的模式与实际不符会记为 `qsv rate control mismatch: requested rc=... but ffmpeg will use ...`
+    （QSV 没有 `rc` 选项，模式由 ffmpeg 的 `qsvenc.c select_rc_mode` 从 AVCodecContext 字段推导，
+    所以可能出现"设了 CBR/CQ 实际却是 VBR"）
+  - `encode enhance: ...` = 增强项已应用；
+    `encode enhance ignored: <name> supports none of the requested options ...` =
+    该编码器不支持所选项（**QSV 等非 nvenc/amf 编码器上 AQ/multipass/pre-analysis 一律无效**）
 - **画质增强**（编码器内建能力，不需要 CPU 侧滤镜，均为可选、默认关）：
   - nvenc：`spatial-aq`（空间自适应量化）、`temporal-aq`（时间自适应量化）、
     `multipass`（两次编码，1/4 分辨率或全分辨率）
@@ -220,7 +232,7 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 | 依赖 | 上游 | 本仓库指向 | 原因 |
 |---|---|---|---|
 | `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
-| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `9e91d81` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `57e0701` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 |
 
 hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`）：
 
@@ -234,5 +246,12 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
 5. **新增 `set_encode_enhance()`**（`spatial-aq`/`temporal-aq`/`multipass`/`preanalysis`）：
    `EncodeContext` 与 `ffmpeg_ram_new_encoder()` FFI 相应扩参；该函数永不返回失败
    （可选项不该拖垮会话），并在 `avcodec_open2` 失败且应用过增强项时去增强重试一次
-6. 会话建立时打印实际生效参数，便于核对
+6. **新增 `set_encode_enhance()`**（`spatial-aq`/`temporal-aq`/`multipass`/`preanalysis`）：
+   `EncodeContext` 与 `ffmpeg_ram_new_encoder()` FFI 相应扩参；该函数永不返回失败
+   （可选项不该拖垮会话），并在 `avcodec_open2` 失败且应用过增强项时去增强重试一次
+7. **把"实际生效的码控"打进日志**：QSV 没有 `rc` 选项，模式由 ffmpeg 的
+   `qsvenc.c select_rc_mode` 从 AVCodecContext 字段推导，可能出现请求 CBR/CQ 而实际
+   走 VBR/CQP 的静默失效，因此 `set_rate_control()` 会回读并打印实际模式、不一致时告警；
+   `set_encode_enhance()` 在请求了编码器不支持的增强项时打印 `encode enhance ignored`；
+   编码器日志补 `bit_rate`/`rc_max_rate`/`global_quality`，并在 `avcodec_open2` 后再打印一次
 

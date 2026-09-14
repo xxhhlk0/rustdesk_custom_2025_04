@@ -69,8 +69,16 @@ pub struct HwEncodeProfile {
     #[serde(default)]
     pub q: Option<i32>,
     /// 编码器侧 fps 覆盖; None = 30
+    /// 注意: 只声明编码器帧率, 不改变实际出帧节奏 —— 实际帧率由 VideoQoS 决定
+    /// (起始 15fps, 按网络延迟逐步爬升, 上限 = 控制端请求的 custom_fps)。
+    /// 要固定帧率需同时打开 pin_fps。
     #[serde(default)]
     pub fps: Option<i32>,
+    /// 锁定串流帧率: 忽略 VideoQoS 的帧率自适应, 直接用 fps 作为出帧间隔。
+    /// VideoQoS 会把帧率从 15fps 缓慢爬升, 且在延迟升高时主动降帧;
+    /// 打开此项后帧率固定为 fps (网络拥塞时表现为卡顿/延迟增大, 不再自动降帧)。
+    #[serde(default)]
+    pub pin_fps: bool,
     /// GOP 覆盖; None = keyframe_interval / MAX_GOP (录制时 240 优先)
     #[serde(default)]
     pub gop: Option<i32>,
@@ -115,6 +123,7 @@ impl Default for HwEncodeProfile {
             kbs: None,
             q: None,
             fps: None,
+            pin_fps: false,
             gop: None,
             spatial_aq: None,
             temporal_aq: None,
@@ -151,6 +160,11 @@ impl HwEncodeProfile {
                 log::warn!("hw-encode-profile: fps {v} 越界(1-120), 忽略");
                 self.fps = None;
             }
+        }
+        if self.pin_fps && self.fps.is_none() {
+            // 没填 fps 时 pin 无意义, 直接关掉, 避免"打开了却没效果"
+            log::warn!("hw-encode-profile: pin_fps 需要同时设置 fps, 已关闭 pin_fps");
+            self.pin_fps = false;
         }
         if let Some(v) = self.gop {
             if !(1..=100000).contains(&v) {
@@ -323,6 +337,16 @@ pub fn disable_vram() -> bool {
     active_profile().map(|p| p.disable_vram).unwrap_or(false)
 }
 
+/// 需要锁定的出帧帧率。Some(fps) 表示忽略 VideoQoS 的帧率自适应, 固定以此帧率出帧;
+/// None = 保持上游行为 (起始 15fps, 由 VideoQoS 按延迟爬升/下降)。
+pub fn pinned_fps() -> Option<u32> {
+    let p = active_profile()?;
+    if !p.pin_fps {
+        return None;
+    }
+    p.fps.filter(|v| *v > 0).map(|v| v as u32)
+}
+
 /// 转换为 scrap 编码器参数; record=true 时 gop 覆盖让位给录制用的 240 帧关键帧间隔。
 /// VRAM 通道仅支持 kbs/fps/gop (preset/rc 由 C 库写死)。
 #[cfg(feature = "hwcodec")]
@@ -422,5 +446,24 @@ mod test {
         // 缺省为 false
         let p = parse_profile(r#"{"id":"custom","fps":60}"#).unwrap();
         assert!(!p.disable_vram);
+    }
+
+    #[test]
+    fn test_pin_fps() {
+        // 默认不锁定
+        let p = parse_profile(r#"{"id":"custom","fps":60}"#).unwrap();
+        assert!(!p.pin_fps);
+        assert_eq!(p.fps, Some(60));
+        // 显式锁定
+        let p = parse_profile(r#"{"id":"custom","fps":60,"pin_fps":true}"#).unwrap();
+        assert!(p.pin_fps);
+        assert_eq!(p.fps, Some(60));
+        // pin_fps 但没填 fps -> 自动关闭
+        let p = parse_profile(r#"{"id":"custom","pin_fps":true}"#).unwrap();
+        assert!(!p.pin_fps);
+        // fps 越界被丢弃时 pin 同样关闭
+        let p = parse_profile(r#"{"id":"custom","fps":999,"pin_fps":true}"#).unwrap();
+        assert_eq!(p.fps, None);
+        assert!(!p.pin_fps);
     }
 }

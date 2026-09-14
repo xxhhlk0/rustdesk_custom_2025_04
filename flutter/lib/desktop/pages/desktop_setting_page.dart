@@ -2003,6 +2003,7 @@ class _DisplayState extends State<_Display> {
   final _customFpsCtrl = TextEditingController();
   final _customGopCtrl = TextEditingController();
   bool _customAdaptive = true;
+  bool _customPinFps = false;
   bool _customDisableVram = false;
   final _customSpatialAqCtrl = TextEditingController();
   final _customTemporalAqCtrl = TextEditingController();
@@ -2053,6 +2054,7 @@ class _DisplayState extends State<_Display> {
         _customMultipassCtrl.text = s(map['multipass']);
         _customPreanalysisCtrl.text = s(map['preanalysis']);
         _customAdaptive = map['bitrate_adaptive'] != false;
+        _customPinFps = map['pin_fps'] == true;
         _customDisableVram = map['disable_vram'] == true;
       } catch (e) {
         debugPrint('failed to parse hw-encode-profile: $e');
@@ -2085,6 +2087,7 @@ class _DisplayState extends State<_Display> {
       'multipass': _hwParseInt(_customMultipassCtrl.text),
       'preanalysis': _hwParseInt(_customPreanalysisCtrl.text),
       'bitrate_adaptive': _customAdaptive,
+      'pin_fps': _customPinFps,
       'disable_vram': _customDisableVram,
     };
     return jsonEncode(map);
@@ -2225,7 +2228,8 @@ class _DisplayState extends State<_Display> {
           }),
           _hwField('Bitrate (kbps)', _customKbsCtrl, number: true, hint: 'Auto if empty'),
           _hwField('QP (0-51, CQ only)', _customQCtrl, number: true, hint: 'Auto if empty'),
-          _hwField('FPS', _customFpsCtrl, number: true, hint: '30 if empty'),
+          _hwField('FPS (encoder)', _customFpsCtrl,
+              number: true, hint: '30 if empty'),
           _hwField('GOP', _customGopCtrl, number: true, hint: 'Default if empty'),
           _hwDropdown('Spatial AQ (nvenc)', _customSpatialAqCtrl.text, {
             '': 'Default',
@@ -2276,6 +2280,19 @@ class _DisplayState extends State<_Display> {
           CheckboxListTile(
               dense: true,
               title: Text(translate(
+                  'Force stream FPS (disable VideoQoS FPS adaptation)')),
+              subtitle: Text(
+                  translate('VideoQoS ramps the frame rate up from 15 fps and lowers it when latency rises, so setting FPS alone changes nothing on screen. Enable this to pin the stream to the FPS above. When the network cannot keep up you get stutter instead of an automatic frame rate drop.'),
+                  style: const TextStyle(fontSize: 12)),
+              value: _customPinFps,
+              onChanged: (v) {
+                _customPinFps = v ?? false;
+                _saveCustomProfile();
+                setState(() {});
+              }),
+          CheckboxListTile(
+              dense: true,
+              title: Text(translate(
                   'Force RAM hardware encoder (disable VRAM texture path)')),
               subtitle: Text(
                   translate('Required for preset / rate control / QP / quality enhancements to take effect. Slightly higher latency due to GPU texture readback.'),
@@ -2287,7 +2304,7 @@ class _DisplayState extends State<_Display> {
                 setState(() {});
               }),
           Text(
-            translate('Note: with CQ the bitrate setting is ignored (a lower QP means better quality and more bandwidth). Quality enhancements are encoder built-in options: spatial AQ / multipass (nvenc), pre-analysis (amf); temporal AQ is not supported by every GPU - if the encoder refuses it, the session retries once with all enhancements removed. VRAM channel only supports bitrate/fps/gop, so preset / rate control / enhancements only apply to the RAM hardware codec path.'),
+            translate('Note: with CQ the bitrate setting is ignored (a lower QP means better quality and more bandwidth). Quality enhancements are encoder built-in options: spatial AQ / multipass (nvenc), pre-analysis (amf); temporal AQ is not supported by every GPU - if the encoder refuses it, the session retries once with all enhancements removed. Options the selected encoder does not support (e.g. AQ/multipass on Intel QSV) are ignored and a warning is logged - check the host log for "hw encode params" / "qsv rate control" to confirm what really took effect. VRAM channel only supports bitrate/fps/gop, so preset / rate control / enhancements only apply to the RAM hardware codec path.'),
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
         ]).marginOnly(left: 12),
