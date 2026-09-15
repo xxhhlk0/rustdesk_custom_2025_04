@@ -70,7 +70,8 @@ pub enum EncoderCfg {
 ///   multipass: 1 = two pass quarter res, 2 = two pass full res。
 ///   注: temporal AQ 在部分 GPU 上不受支持, hwcodec 会在编码器初始化失败时
 ///   自动去掉增强项重试一次。
-/// 注意: VRAM 通道仅支持 kbs/fps/gop (preset/rc 由 hwcodec C 库写死, 此处忽略)。
+/// 注意: VRAM 通道历史上仅支持 kbs/fps/gop; hwcodec vram-profile 分支起
+/// preset/rc/q/画质增强 也会透传到 C 侧 (DynamicContext)。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HwEncoderParams {
     pub preset: Option<i32>,

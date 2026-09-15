@@ -348,7 +348,7 @@ pub fn pinned_fps() -> Option<u32> {
 }
 
 /// 转换为 scrap 编码器参数; record=true 时 gop 覆盖让位给录制用的 240 帧关键帧间隔。
-/// VRAM 通道仅支持 kbs/fps/gop (preset/rc 由 C 库写死)。
+/// VRAM 通道 (hwcodec vram-profile 起) 同样接收 preset/rc/q/画质增强。
 #[cfg(feature = "hwcodec")]
 pub fn hw_params(record: bool) -> Option<scrap::codec::HwEncoderParams> {
     let p = active_profile()?;

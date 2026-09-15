@@ -43,7 +43,7 @@ lazy_static::lazy_static! {
 }
 
 /// 编码预设与码率控制枚举映射 (数值语义见 codec.rs HwEncoderParams)
-fn map_quality(v: i32) -> Quality {
+pub(crate) fn map_quality(v: i32) -> Quality {
     match v {
         1 => Quality_High,
         2 => Quality_Medium,
@@ -52,7 +52,7 @@ fn map_quality(v: i32) -> Quality {
     }
 }
 
-fn map_rate_control(v: i32) -> RateControl {
+pub(crate) fn map_rate_control(v: i32) -> RateControl {
     match v {
         1 => RC_CBR,
         2 => RC_VBR,

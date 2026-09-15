@@ -2295,7 +2295,7 @@ class _DisplayState extends State<_Display> {
               title: Text(translate(
                   'Force RAM hardware encoder (disable VRAM texture path)')),
               subtitle: Text(
-                  translate('Required for preset / rate control / QP / quality enhancements to take effect. Slightly higher latency due to GPU texture readback.'),
+                  translate('No longer required for preset / rate control / QP / quality enhancements (the VRAM texture path passes them through too). Keep it only to avoid the GPU texture readback - it can improve fps but slightly increases latency.'),
                   style: const TextStyle(fontSize: 12)),
               value: _customDisableVram,
               onChanged: (v) {
@@ -2304,7 +2304,7 @@ class _DisplayState extends State<_Display> {
                 setState(() {});
               }),
           Text(
-            translate('Note: with CQ the bitrate setting is ignored (a lower QP means better quality and more bandwidth). Quality enhancements are encoder built-in options: spatial AQ / multipass (nvenc), pre-analysis (amf); temporal AQ is not supported by every GPU - if the encoder refuses it, the session retries once with all enhancements removed. Options the selected encoder does not support (e.g. AQ/multipass on Intel QSV) are ignored and a warning is logged - check the host log for "hw encode params" / "qsv rate control" to confirm what really took effect. VRAM channel only supports bitrate/fps/gop, so preset / rate control / enhancements only apply to the RAM hardware codec path.'),
+            translate('Note: with CQ the bitrate setting is ignored (a lower QP means better quality and more bandwidth). Quality enhancements are encoder built-in options: spatial AQ / multipass (nvenc), pre-analysis (amf); temporal AQ is not supported by every GPU - if the encoder refuses it, the session retries once with all enhancements removed. Options the selected encoder does not support (e.g. AQ/multipass on Intel QSV) are ignored and a warning is logged - check the host log for "hw encode params" / "qsv rate control" to confirm what really took effect. The VRAM (texture) path now also passes preset / rate control / QP / enhancements through, so disabling VRAM is no longer required for them to take effect - but it still avoids the GPU texture readback and can improve fps.'),
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
         ]).marginOnly(left: 12),

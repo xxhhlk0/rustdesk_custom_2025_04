@@ -60,10 +60,11 @@ gstreamer-video = { version = "0.16", optional = true }
 zbus = { version = "3.15", optional = true }
 
 [dependencies.hwcodec]
-# fork: 恢复 encoder preset 生效 + constant QP (CQ) 码率控制 + 可选画质增强
-# (nvenc constqp+qp / amf cqp+qp_i|p|b / qsv ICQ+CBR / spatial AQ / multipass / preanalysis)
+# fork: VRAM 通道透传编码 profile (preset/rc/QP/画质增强) + 恢复 encoder preset 生效 +
+# CQ 码率控制 (nvenc constqp / amf cqp / qsv ICQ) + 可选画质增强 + 码控日志
+# branch: vram-profile
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "57e0701a942610b207ad225183c5bd5a13bd9124"
+rev = "0a3bff5db8f55b6b844d51f0c076cec0559b8a93"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]

@@ -42,8 +42,8 @@ pub struct VRamEncoderConfig {
     pub quality: f32,
     pub feature: FeatureContext,
     pub keyframe_interval: Option<usize>,
-    /// 注意: VRAM 通道参数面较窄, 仅支持 kbs / fps / gop 覆盖;
-    /// preset(编码预设)与 rc(码率控制)在 hwcodec C 库内写死, 此处忽略。
+    /// 编码 profile 透传: kbs / fps / gop 之外, preset / rc / q / 画质增强
+    /// 也会经 DynamicContext 传到 hwcodec C 库 (需 hwcodec >= 参数透传版本)。
     pub params: Option<HwEncoderParams>,
 }
 
@@ -76,6 +76,23 @@ impl EncoderApi for VRamEncoder {
                 let gop = params
                     .gop
                     .unwrap_or(config.keyframe_interval.unwrap_or(MAX_GOP as _) as _);
+                // 透传编码 profile: preset / rc / QP / 画质增强 (C 侧 RC_DEFAULT 回退 CBR, q=-1 不设置)
+                #[cfg(feature = "hwcodec")]
+                let quality = super::hwcodec::map_quality(params.preset.unwrap_or(0)) as i32;
+                #[cfg(not(feature = "hwcodec"))]
+                let quality = params.preset.unwrap_or(0);
+                #[cfg(feature = "hwcodec")]
+                let rc = super::hwcodec::map_rate_control(match params.rc {
+                    // 无 profile 时保持旧行为: CBR
+                    Some(v) => v,
+                    None => 1,
+                }) as i32;
+                #[cfg(not(feature = "hwcodec"))]
+                let rc = match params.rc {
+                    // 无 profile 时保持旧行为: CBR
+                    Some(v) => v,
+                    None => 1,
+                };
                 let ctx = EncodeContext {
                     f: config.feature.clone(),
                     d: DynamicContext {
@@ -85,6 +102,13 @@ impl EncoderApi for VRamEncoder {
                         kbitrate: bitrate as _,
                         framerate: params.fps.unwrap_or(30),
                         gop,
+                        quality,
+                        rc,
+                        q: params.q.unwrap_or(-1),
+                        spatial_aq: params.spatial_aq.unwrap_or(false),
+                        temporal_aq: params.temporal_aq.unwrap_or(false),
+                        multipass: params.multipass.unwrap_or(0),
+                        preanalysis: params.preanalysis.unwrap_or(false),
                     },
                 };
                 match Encoder::new(ctx.clone()) {
@@ -398,6 +422,7 @@ pub(crate) fn check_available_vram() -> (Vec<FeatureContext>, Vec<DecodeContext>
         kbitrate: 5000,
         framerate: 60,
         gop: MAX_GOP as _,
+        ..Default::default()
     };
     let encoders = encode::available(d);
     let decoders = decode::available();
