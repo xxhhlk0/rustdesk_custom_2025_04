@@ -655,6 +655,12 @@ fn run(vs: VideoService) -> ResultType<()> {
     let capture_width = c.width;
     let capture_height = c.height;
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
+    // 诊断统计 (每秒一行): 定位 fps 瓶颈在采集超时 / 每帧耗时 / 等待控制端取帧
+    let mut stat_instant = Instant::now();
+    let mut stat_loops = 0u32;
+    let mut stat_would_block = 0u32;
+    let mut stat_cost_us = 0u64;
+    let mut stat_fetch_us = 0u64;
 
     while sp.ok() {
         #[cfg(windows)]
@@ -803,6 +809,7 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         match res {
             Err(ref e) if e.kind() == WouldBlock => {
+                stat_would_block += 1;
                 #[cfg(windows)]
                 if try_gdi > 0 && !c.is_gdi() {
                     if try_gdi > 3 {
@@ -885,13 +892,33 @@ fn run(vs: VideoService) -> ResultType<()> {
                 break;
             }
         }
+        stat_fetch_us += wait_begin.elapsed().as_micros() as u64;
         DISPLAY_CONN_IDS.lock().unwrap().remove(&display_idx);
 
         let elapsed = now.elapsed();
+        stat_cost_us += elapsed.as_micros() as u64;
         // may need to enable frame(timeout)
         log::trace!("{:?} {:?}", time::Instant::now(), elapsed);
         if elapsed < spf {
             std::thread::sleep(spf - elapsed);
+        }
+        stat_loops += 1;
+        if stat_instant.elapsed().as_millis() >= 1000 {
+            let stat_ms = stat_instant.elapsed().as_millis().max(1) as f64;
+            log::info!(
+                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms",
+                spf.as_secs_f32() * 1000.0,
+                stat_loops as f64 * 1000.0 / stat_ms,
+                send_counter,
+                stat_would_block,
+                stat_cost_us as f64 / 1000.0 / stat_loops.max(1) as f64,
+                stat_fetch_us as f64 / 1000.0 / stat_loops.max(1) as f64,
+            );
+            stat_instant = Instant::now();
+            stat_loops = 0;
+            stat_would_block = 0;
+            stat_cost_us = 0;
+            stat_fetch_us = 0;
         }
     }
 
