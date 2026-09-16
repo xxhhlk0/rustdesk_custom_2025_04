@@ -62,6 +62,12 @@ use std::{
 
 pub const OPTION_REFRESH: &'static str = "refresh";
 
+// 诊断: 被控端每帧三段耗时 (微秒), 由视频主循环每秒 swap 读取并清零。
+// snapshot: 订阅者检查; encode: GPU 编码 + 构造消息; send: 投递到发送队列。
+static STAT_SNAP_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STAT_ENC_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STAT_SEND_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
 
@@ -917,8 +923,11 @@ fn run(vs: VideoService) -> ResultType<()> {
         if stat_instant.elapsed().as_millis() >= 1000 {
             let stat_ms = stat_instant.elapsed().as_millis().max(1) as f64;
             let stat_succ_f = stat_succ.max(1) as f64;
+            let stat_snap_us = STAT_SNAP_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let stat_enc_us = STAT_ENC_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let stat_send_us = STAT_SEND_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             log::info!(
-                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms",
+                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms, avg_snap={:.2}ms, avg_enc={:.1}ms, avg_send={:.1}ms",
                 spf.as_secs_f32() * 1000.0,
                 stat_loops as f64 * 1000.0 / stat_ms,
                 send_counter,
@@ -929,6 +938,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                 stat_cap_us as f64 / 1000.0 / stat_succ_f,
                 stat_convert_us as f64 / 1000.0 / stat_succ_f,
                 stat_handle_us as f64 / 1000.0 / stat_succ_f,
+                stat_snap_us as f64 / 1000.0 / stat_succ_f,
+                stat_enc_us as f64 / 1000.0 / stat_succ_f,
+                stat_send_us as f64 / 1000.0 / stat_succ_f,
             );
             stat_instant = Instant::now();
             stat_loops = 0;
@@ -1209,6 +1221,7 @@ fn handle_one_frame(
     width: usize,
     height: usize,
 ) -> ResultType<HashSet<i32>> {
+    let stat_snap_begin = Instant::now();
     sp.snapshot(|sps| {
         // so that new sub and old sub share the same encoder after switch
         if sps.has_subscribes() {
@@ -1217,12 +1230,21 @@ fn handle_one_frame(
         }
         Ok(())
     })?;
+    STAT_SNAP_US.fetch_add(
+        stat_snap_begin.elapsed().as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     let mut send_conn_ids: HashSet<i32> = Default::default();
     let first = *first_frame;
     *first_frame = false;
+    let stat_enc_begin = Instant::now();
     match encoder.encode_to_message(frame, ms) {
         Ok(mut vf) => {
+            STAT_ENC_US.fetch_add(
+                stat_enc_begin.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             *encode_fail_counter = 0;
             vf.display = display as _;
             let mut msg = Message::new();
@@ -1232,7 +1254,12 @@ fn handle_one_frame(
                 .unwrap()
                 .as_mut()
                 .map(|r| r.write_message(&msg, width, height));
+            let stat_send_begin = Instant::now();
             send_conn_ids = sp.send_video_frame(msg);
+            STAT_SEND_US.fetch_add(
+                stat_send_begin.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
         Err(e) => {
             *encode_fail_counter += 1;
