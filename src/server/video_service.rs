@@ -661,6 +661,10 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut stat_would_block = 0u32;
     let mut stat_cost_us = 0u64;
     let mut stat_fetch_us = 0u64;
+    let mut stat_succ = 0u32;
+    let mut stat_cap_us = 0u64;
+    let mut stat_convert_us = 0u64;
+    let mut stat_handle_us = 0u64;
 
     while sp.ok() {
         #[cfg(windows)]
@@ -727,8 +731,11 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         let time = now - start;
         let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
+        let stat_cap_begin = Instant::now();
         let res = match c.frame(spf) {
             Ok(frame) => {
+                stat_cap_us += stat_cap_begin.elapsed().as_micros() as u64;
+                stat_succ += 1;
                 repeat_encode_counter = 0;
                 if frame.valid() {
                     let screenshot_key = (vs.source, display_idx);
@@ -778,7 +785,10 @@ fn run(vs: VideoService) -> ResultType<()> {
                         }
                     }
 
+                    let stat_convert_begin = Instant::now();
                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
+                    stat_convert_us += stat_convert_begin.elapsed().as_micros() as u64;
+                    let stat_handle_begin = Instant::now();
                     let send_conn_ids = handle_one_frame(
                         display_idx,
                         &sp,
@@ -791,6 +801,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         capture_width,
                         capture_height,
                     )?;
+                    stat_handle_us += stat_handle_begin.elapsed().as_micros() as u64;
                     frame_controller.set_send(now, send_conn_ids);
                     send_counter += 1;
                 }
@@ -905,20 +916,29 @@ fn run(vs: VideoService) -> ResultType<()> {
         stat_loops += 1;
         if stat_instant.elapsed().as_millis() >= 1000 {
             let stat_ms = stat_instant.elapsed().as_millis().max(1) as f64;
+            let stat_succ_f = stat_succ.max(1) as f64;
             log::info!(
-                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms",
+                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms",
                 spf.as_secs_f32() * 1000.0,
                 stat_loops as f64 * 1000.0 / stat_ms,
                 send_counter,
                 stat_would_block,
                 stat_cost_us as f64 / 1000.0 / stat_loops.max(1) as f64,
                 stat_fetch_us as f64 / 1000.0 / stat_loops.max(1) as f64,
+                stat_succ,
+                stat_cap_us as f64 / 1000.0 / stat_succ_f,
+                stat_convert_us as f64 / 1000.0 / stat_succ_f,
+                stat_handle_us as f64 / 1000.0 / stat_succ_f,
             );
             stat_instant = Instant::now();
             stat_loops = 0;
             stat_would_block = 0;
             stat_cost_us = 0;
             stat_fetch_us = 0;
+            stat_succ = 0;
+            stat_cap_us = 0;
+            stat_convert_us = 0;
+            stat_handle_us = 0;
         }
     }
 
