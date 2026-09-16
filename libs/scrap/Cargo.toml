@@ -61,10 +61,11 @@ zbus = { version = "3.15", optional = true }
 
 [dependencies.hwcodec]
 # fork: VRAM 通道透传编码 profile (preset/rc/QP/画质增强) + 恢复 encoder preset 生效 +
-# CQ 码率控制 (nvenc constqp / amf cqp / qsv ICQ) + 可选画质增强 + 码控日志
+# CQ 码率控制 (nvenc constqp / amf cqp / qsv ICQ) + 可选画质增强 + 码控日志 +
+# qsv/vaapi async_depth=2 (上游写死 1, 会让 iGPU 编码吞吐腰斩) + 首帧 EAGAIN 容忍
 # branch: vram-profile
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "0a3bff5db8f55b6b844d51f0c076cec0559b8a93"
+rev = "516577db120fc132ad95bb51d0c08ed9bc9f321b"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]

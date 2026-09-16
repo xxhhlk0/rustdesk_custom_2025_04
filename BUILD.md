@@ -232,9 +232,10 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 | 依赖 | 上游 | 本仓库指向 | 原因 |
 |---|---|---|---|
 | `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
-| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `57e0701` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `516577d` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth` 1→2） |
 
-hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`）：
+hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`、
+`cpp/ffmpeg_vram/ffmpeg_vram_encode.cpp`）：
 
 1. **恢复 preset 生效**：上游把 `util_encode::set_quality()` 调用注释掉了，导致 profile 的
    `preset` 字段传进 C 后完全没被使用；现已恢复（`Quality_Default` 仍是 no-op，默认行为不变）
@@ -254,4 +255,13 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
    走 VBR/CQP 的静默失效，因此 `set_rate_control()` 会回读并打印实际模式、不一致时告警；
    `set_encode_enhance()` 在请求了编码器不支持的增强项时打印 `encode enhance ignored`；
    编码器日志补 `bit_rate`/`rc_max_rate`/`global_quality`，并在 `avcodec_open2` 后再打印一次
+8. **qsv/vaapi `async_depth` 由写死的 1 改为 2（`HWCODEC_ASYNC_DEPTH`）**：上游为了"最低延迟"
+   把流水线深度锁成 1，iGPU 无法重叠"取帧-编码-回读"，编码吞吐直接腰斩——
+   Intel UHD 750 @2560x1440 实测 `async_depth=1` 只有 89fps（11.2ms/帧），
+   `=2` 为 116fps（8.6ms/帧），`=4` 与默认值同量级。写死 1 时 60fps 会话必然被编码耗时卡在
+   45fps 左右（采集 5ms + 编码 14ms > 16.7ms 预算）。代价是多 1 帧管线延迟（60fps 下约 16ms），
+   同时 `do_encode()` 容忍首帧 `EAGAIN`（等包而不是立刻返回失败，否则首帧会被上层当成编码错误
+   并切掉硬件编码器），交付完当前帧的包后即正常收工、不空等到超时。qsv 与 vaapi 两条路都生效，
+   RAM 与 VRAM 通道共用该函数
+
 
