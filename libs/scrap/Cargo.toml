@@ -66,7 +66,7 @@ zbus = { version = "3.15", optional = true }
 # + 首帧 EAGAIN 容忍 + open 失败自动回退 (见 BUILD.md 第 8 条)
 # branch: vram-profile
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "e03451d9e0073a67f26d881fe81c2f8456117d37"
+rev = "c8a675414f16e88f6633f598c436ddd67aac0f3f"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
