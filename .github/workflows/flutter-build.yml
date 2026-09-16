@@ -53,6 +53,18 @@ env:
   CUSTOM_WS_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_WS_RENDEZVOUS_PORT }}"
   CUSTOM_WS_RELAY_PORT: "${{ secrets.CUSTOM_WS_RELAY_PORT }}"
 
+# googlesource.com (chromium/aomedia) 间歇性 502/503, 会让 cargo 拉 rust-webm 的
+# libwebm 子模块、vcpkg 拉 libyuv/aom port 直接失败 (2026-09-14 与 2026-09-16 两次
+# 全线失败都栽在这)。git config 的 url.<base>.insteadOf 是前缀重写, cargo(libgit2)
+# 和 vcpkg(git) 都会读全局配置, 一步根治。各 job 在 Checkout 之后复用本步骤。
+x-googlesource-mirror: &googlesource-mirror
+  name: Redirect googlesource fetches to GitHub mirrors
+  shell: bash
+  run: |
+    git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+    git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+    git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
+
 jobs:
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
@@ -119,6 +131,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
+
+      - *googlesource-mirror
 
       - name: Restore bridge files from R2
         shell: bash
@@ -464,6 +478,8 @@ jobs:
         with:
           submodules: recursive
 
+      - *googlesource-mirror
+
       - name: Install LLVM and Clang
         uses: rustdesk-org/install-llvm-action-32bit@6aa7d9ad3df84dff01cd4596dd0fc880a7f47fce # no release tag; commit 2026-05-26
         with:
@@ -654,6 +670,8 @@ jobs:
         with:
           submodules: recursive
 
+      - *googlesource-mirror
+
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
@@ -822,6 +840,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
+
+      - *googlesource-mirror
 
       - name: Import the codesign cert
         if: env.MACOS_P12_BASE64 != null
@@ -1162,6 +1182,8 @@ jobs:
         with:
           submodules: recursive
 
+      - *googlesource-mirror
+
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
@@ -1492,6 +1514,8 @@ jobs:
         with:
           submodules: recursive
 
+      - *googlesource-mirror
+
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
@@ -1645,6 +1669,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
+
+      - *googlesource-mirror
 
       - name: Set Swap Space
         if: ${{ matrix.job.arch == 'x86_64' }}
@@ -1813,6 +1839,10 @@ jobs:
           run: |
             # disable git safe.directory
             git config --global --add safe.directory "*"
+            # googlesource 偶发 502/503: 重定向到 GitHub 镜像 (cargo/vcpkg 都读全局 config)
+            git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+            git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+            git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
             # rust
             pushd /opt
             # do not use rustup, because memory overflow in qemu
@@ -2150,6 +2180,10 @@ jobs:
           run: |
             # disable git safe.directory
             git config --global --add safe.directory "*"
+            # googlesource 偶发 502/503: 重定向到 GitHub 镜像 (cargo/vcpkg 都读全局 config)
+            git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+            git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+            git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
             # set python3.7 as default python3
             update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.7 1
             # add built CMake to PATH and set VCPKG_FORCE_SYSTEM_BINARIES Afor arm-linux
