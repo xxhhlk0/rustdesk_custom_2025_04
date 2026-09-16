@@ -53,18 +53,6 @@ env:
   CUSTOM_WS_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_WS_RENDEZVOUS_PORT }}"
   CUSTOM_WS_RELAY_PORT: "${{ secrets.CUSTOM_WS_RELAY_PORT }}"
 
-# googlesource.com (chromium/aomedia) 间歇性 502/503, 会让 cargo 拉 rust-webm 的
-# libwebm 子模块、vcpkg 拉 libyuv/aom port 直接失败 (2026-09-14 与 2026-09-16 两次
-# 全线失败都栽在这)。git config 的 url.<base>.insteadOf 是前缀重写, cargo(libgit2)
-# 和 vcpkg(git) 都会读全局配置, 一步根治。各 job 在 Checkout 之后复用本步骤。
-x-googlesource-mirror: &googlesource-mirror
-  name: Redirect googlesource fetches to GitHub mirrors
-  shell: bash
-  run: |
-    git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-    git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-    git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
-
 jobs:
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
@@ -132,7 +120,15 @@ jobs:
         with:
           submodules: recursive
 
-      - *googlesource-mirror
+      - name: Redirect googlesource fetches to GitHub mirrors
+        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
+        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
+        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
+        shell: bash
+        run: |
+          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+          git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
 
       - name: Restore bridge files from R2
         shell: bash
@@ -478,7 +474,15 @@ jobs:
         with:
           submodules: recursive
 
-      - *googlesource-mirror
+      - name: Redirect googlesource fetches to GitHub mirrors
+        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
+        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
+        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
+        shell: bash
+        run: |
+          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+          git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
 
       - name: Install LLVM and Clang
         uses: rustdesk-org/install-llvm-action-32bit@6aa7d9ad3df84dff01cd4596dd0fc880a7f47fce # no release tag; commit 2026-05-26
@@ -670,7 +674,15 @@ jobs:
         with:
           submodules: recursive
 
-      - *googlesource-mirror
+      - name: Redirect googlesource fetches to GitHub mirrors
+        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
+        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
+        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
+        shell: bash
+        run: |
+          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+          git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
 
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -841,7 +853,15 @@ jobs:
         with:
           submodules: recursive
 
-      - *googlesource-mirror
+      - name: Redirect googlesource fetches to GitHub mirrors
+        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
+        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
+        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
+        shell: bash
+        run: |
+          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+          git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
 
       - name: Import the codesign cert
         if: env.MACOS_P12_BASE64 != null
@@ -1182,7 +1202,15 @@ jobs:
         with:
           submodules: recursive
 
-      - *googlesource-mirror
+      - name: Redirect googlesource fetches to GitHub mirrors
+        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
+        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
+        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
+        shell: bash
+        run: |
+          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+          git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
 
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -1514,7 +1542,15 @@ jobs:
         with:
           submodules: recursive
 
-      - *googlesource-mirror
+      - name: Redirect googlesource fetches to GitHub mirrors
+        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
+        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
+        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
+        shell: bash
+        run: |
+          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+          git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
 
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -1670,7 +1706,15 @@ jobs:
         with:
           submodules: recursive
 
-      - *googlesource-mirror
+      - name: Redirect googlesource fetches to GitHub mirrors
+        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
+        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
+        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
+        shell: bash
+        run: |
+          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+          git config --global url."https://github.com/mozilla/aom.git".insteadOf "https://aomedia.googlesource.com/aom"
 
       - name: Set Swap Space
         if: ${{ matrix.job.arch == 'x86_64' }}
