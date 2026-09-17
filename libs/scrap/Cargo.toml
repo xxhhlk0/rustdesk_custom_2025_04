@@ -64,9 +64,10 @@ zbus = { version = "3.15", optional = true }
 # CQ 码率控制 (nvenc constqp / amf cqp / qsv ICQ) + 可选画质增强 + 码控日志 +
 # qsv 编码吞吐修复 (async_depth=2 + low_power=1 + low_delay_brc=1, 1440p 78fps -> 154fps)
 # + 首帧 EAGAIN 容忍 + open 失败自动回退 (见 BUILD.md 第 8 条)
+# + 环形 surface 池 + d3d11 VP input/output view 按纹理缓存 (原每帧新建 2 个 view)
 # branch: vram-profile
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "c8a675414f16e88f6633f598c436ddd67aac0f3f"
+rev = "872f957e41845cf100c6c7b31bdcbf27a198bad8"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
