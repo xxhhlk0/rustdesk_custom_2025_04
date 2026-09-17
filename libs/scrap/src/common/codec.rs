@@ -46,6 +46,9 @@ lazy_static::lazy_static! {
 }
 
 pub const ENCODE_NEED_SWITCH: &'static str = "ENCODE_NEED_SWITCH";
+// vram 异步编码流水线: 本帧已提交但包尚未产出 (hwcodec AsyncDepth>1)。
+// 不是编码错误, 调用方不应计入失败次数。
+pub const ENCODE_PENDING: &'static str = "ENCODE_PENDING";
 
 #[derive(Debug, Clone)]
 pub enum EncoderCfg {

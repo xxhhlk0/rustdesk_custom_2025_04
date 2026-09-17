@@ -182,7 +182,9 @@ impl EncoderApi for VRamEncoder {
             }
             Ok(vf)
         } else {
-            Err(anyhow!("no valid frame"))
+            // vram 异步编码流水线: 帧已提交, 包尚未产出, 由下一帧调用收取。
+            // 调用方 (handle_one_frame) 对该错误不计入编码失败。
+            bail!(crate::codec::ENCODE_PENDING)
         }
     }
 

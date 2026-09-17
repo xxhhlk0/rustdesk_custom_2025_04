@@ -65,9 +65,10 @@ zbus = { version = "3.15", optional = true }
 # qsv 编码吞吐修复 (async_depth=2 + low_power=1 + low_delay_brc=1, 1440p 78fps -> 154fps)
 # + 首帧 EAGAIN 容忍 + open 失败自动回退 (见 BUILD.md 第 8 条)
 # + 环形 surface 池 + d3d11 VP input/output view 按纹理缓存 (原每帧新建 2 个 view)
+# + mfx 原生路径异步编码流水线 (AsyncDepth>1 延迟收取, vram 通道实际走 mfx 驱动!)
 # branch: vram-profile
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "872f957e41845cf100c6c7b31bdcbf27a198bad8"
+rev = "eba09860c43525f6ddf0e378f3b52796d30c4547"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]

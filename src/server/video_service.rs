@@ -1262,6 +1262,10 @@ fn handle_one_frame(
             );
         }
         Err(e) => {
+            // vram 异步编码流水线: 帧已提交但包未产出, 不是错误
+            if e.to_string() == scrap::codec::ENCODE_PENDING {
+                return Ok(send_conn_ids);
+            }
             *encode_fail_counter += 1;
             // Encoding errors are not frequent except on Android
             if !cfg!(target_os = "android") {
