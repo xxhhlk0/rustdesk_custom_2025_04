@@ -66,9 +66,10 @@ zbus = { version = "3.15", optional = true }
 # + 首帧 EAGAIN 容忍 + open 失败自动回退 (见 BUILD.md 第 8 条)
 # + 环形 surface 池 + d3d11 VP input/output view 按纹理缓存 (原每帧新建 2 个 view)
 # + mfx 原生路径异步编码流水线 (AsyncDepth>1 延迟收取, vram 通道实际走 mfx 驱动!)
+# + mfx 异步: MORE_DATA 不再当致命错误 (否则硬件探测失败 -> vram_encode=[] 禁用硬编)
 # branch: vram-profile
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "980b43d5341a69b9bc422f4b251786f53bbbc45e"
+rev = "5f2675e85f8962a9a9f56ce006dd76a39d87b513"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
