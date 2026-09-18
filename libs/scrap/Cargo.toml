@@ -68,7 +68,7 @@ zbus = { version = "3.15", optional = true }
 # + mfx 原生路径异步编码流水线 (AsyncDepth>1 延迟收取, vram 通道实际走 mfx 驱动!)
 # branch: vram-profile
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "eba09860c43525f6ddf0e378f3b52796d30c4547"
+rev = "980b43d5341a69b9bc422f4b251786f53bbbc45e"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
