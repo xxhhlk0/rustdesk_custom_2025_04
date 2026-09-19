@@ -671,6 +671,9 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut stat_cap_us = 0u64;
     let mut stat_convert_us = 0u64;
     let mut stat_handle_us = 0u64;
+    // 固定节拍用的绝对 deadline (见循环末尾): Windows 的 sleep 精度很差,
+    // 16.7ms 目标下每轮多睡 1~2ms 就会把 60fps 拖成 ~54fps。
+    let mut frame_deadline = Instant::now();
 
     while sp.ok() {
         #[cfg(windows)]
@@ -916,8 +919,25 @@ fn run(vs: VideoService) -> ResultType<()> {
         stat_cost_us += elapsed.as_micros() as u64;
         // may need to enable frame(timeout)
         log::trace!("{:?} {:?}", time::Instant::now(), elapsed);
-        if elapsed < spf {
-            std::thread::sleep(spf - elapsed);
+        // 固定节拍: 用累加的绝对 deadline 而不是 sleep(spf - elapsed)。
+        // 实测 (1440p@120 虚拟屏被控端) 每轮 sleep 会多睡 1~2ms (Windows 定时器
+        // 精度), 循环被拖到 ~18.5ms -> 只有 ~54fps; 且循环开头到 `now` 之间的
+        // 检查开销也没算进 elapsed。绝对 deadline 能同时吸收这两者, 末尾自旋
+        // 补掉 sleep 的过冲, 周期才会精确等于 spf。
+        frame_deadline += spf;
+        let tail_now = Instant::now();
+        if tail_now < frame_deadline {
+            let remain = frame_deadline - tail_now;
+            const SPIN_BUDGET: Duration = Duration::from_millis(3);
+            if remain > SPIN_BUDGET {
+                std::thread::sleep(remain - SPIN_BUDGET);
+            }
+            while Instant::now() < frame_deadline {
+                std::hint::spin_loop();
+            }
+        } else if tail_now > frame_deadline + spf {
+            // 落后超过一个周期 (切换/卡顿): 重新对齐, 避免追补性爆发
+            frame_deadline = tail_now;
         }
         stat_loops += 1;
         if stat_instant.elapsed().as_millis() >= 1000 {
