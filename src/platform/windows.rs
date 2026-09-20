@@ -541,6 +541,8 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 extern "C" {
     fn get_current_session(rdp: BOOL) -> DWORD;
     fn is_session_locked(session_id: DWORD) -> BOOL;
+    fn pick_capture_session() -> DWORD;
+    fn session_has_user(session_id: DWORD) -> BOOL;
     fn LaunchProcessWin(
         cmd: *const u16,
         session_id: DWORD,
@@ -674,7 +676,14 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
 
     let mut session_id = unsafe { get_current_session(share_rdp()) };
     log::info!("session id {}", session_id);
-    let mut h_process = launch_server(session_id, true).await.unwrap_or(NULL);
+    let capture_session = unsafe { pick_capture_session() };
+    log::info!("pick_capture_session {}", capture_session);
+    let mut h_process = if capture_session != 0 {
+        launch_server(capture_session, true).await.unwrap_or(NULL)
+    } else {
+        log::warn!("no capturable session yet, skipping --server launch to avoid Session0");
+        NULL
+    };
     let mut incoming = ipc::new_listener(crate::POSTFIX_SERVICE).await?;
     let mut stored_usid = None;
     loop {
@@ -760,12 +769,20 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
                             && exit_code != STILL_ACTIVE
                             && CloseHandle(h_process) == TRUE)
                     {
-                        match launch_server(session_id, !close_sent).await {
-                            Ok(ptr) => {
-                                h_process = ptr;
-                            }
-                            Err(err) => {
-                                log::error!("Failed to launch server: {}", err);
+                        let capture_session = pick_capture_session();
+                        log::info!("pick_capture_session {}", capture_session);
+                        if capture_session == 0 {
+                            log::warn!(
+                                "no capturable session yet, skipping --server launch to avoid Session0"
+                            );
+                        } else {
+                            match launch_server(capture_session, !close_sent).await {
+                                Ok(ptr) => {
+                                    h_process = ptr;
+                                }
+                                Err(err) => {
+                                    log::error!("Failed to launch server: {}", err);
+                                }
                             }
                         }
                     }
@@ -820,6 +837,18 @@ pub fn launch_privileged_process(session_id: DWORD, cmd: &str) -> ResultType<HAN
         );
         if token_pid == 0 {
             log::error!("No process winlogon.exe");
+        }
+        if session_id == 0 || unsafe { session_has_user(session_id) } == FALSE {
+            bail!(
+                "session {} has no usable user desktop/token source",
+                session_id
+            );
+        } else {
+            bail!(
+                "failed to launch --server into session {}: {}",
+                session_id,
+                io::Error::last_os_error()
+            );
         }
     }
     Ok(h)
