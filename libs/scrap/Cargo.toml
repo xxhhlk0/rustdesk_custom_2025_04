@@ -62,14 +62,16 @@ zbus = { version = "3.15", optional = true }
 [dependencies.hwcodec]
 # fork: VRAM 通道透传编码 profile (preset/rc/QP/画质增强) + 恢复 encoder preset 生效 +
 # CQ 码率控制 (nvenc constqp / amf cqp / qsv ICQ) + 可选画质增强 + 码控日志 +
-# qsv 编码吞吐修复 (async_depth=2 + low_power=1 + low_delay_brc=1, 1440p 78fps -> 154fps)
+# qsv 编码吞吐修复 (async_depth=1 + low_power=1 + low_delay_brc=1, 1440p 78fps -> 154fps)
 # + 首帧 EAGAIN 容忍 + open 失败自动回退 (见 BUILD.md 第 8 条)
 # + 环形 surface 池 + d3d11 VP input/output view 按纹理缓存 (原每帧新建 2 个 view)
 # + mfx 原生路径异步编码流水线 (AsyncDepth>1 延迟收取, vram 通道实际走 mfx 驱动!)
 # + mfx 异步: MORE_DATA 不再当致命错误 (否则硬件探测失败 -> vram_encode=[] 禁用硬编)
+# + qsv/vaapi hw_async_depth 默认改回 1 (async_depth=2 时首帧不出包, 会被运行时
+#   误判降级到 AV1 软编; 改 1 首帧即出, 不降级, 与 Sunshine 取值一致)
 # branch: vram-profile
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "5f2675e85f8962a9a9f56ce006dd76a39d87b513"
+rev = "4d86853adfd8c5f55a0ed6982df5d3a40aaaae0b"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
