@@ -1,0 +1,322 @@
+name: Windows Flutter CI (x64 only)
+
+on:
+  workflow_dispatch:
+
+env:
+  SCITER_RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503, also 1.78 has ABI change which causes our sciter version not working, https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
+  RUST_VERSION: "1.75" # sciter failed on m1 with 1.78 because of https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # vcpkg version: 2025.08.27
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VERSION: "1.4.9"
+  # AWS CLI retry configuration for R2 operations
+  AWS_MAX_ATTEMPTS: "5"
+  AWS_RETRY_MODE: "standard"
+  SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}-2"
+  # Custom server configuration (embedded at build time)
+  CUSTOM_RENDEZVOUS_SERVER: "${{ secrets.CUSTOM_RENDEZVOUS_SERVER }}"
+  CUSTOM_RS_PUB_KEY: "${{ secrets.CUSTOM_RS_PUB_KEY }}"
+  CUSTOM_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_RENDEZVOUS_PORT }}"
+  CUSTOM_RELAY_PORT: "${{ secrets.CUSTOM_RELAY_PORT }}"
+  CUSTOM_WS_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_WS_RENDEZVOUS_PORT }}"
+  CUSTOM_WS_RELAY_PORT: "${{ secrets.CUSTOM_WS_RELAY_PORT }}"
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+    secrets: inherit
+
+  build-RustDeskTempTopMostWindow:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    secrets: inherit
+    with:
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
+  build-for-windows-flutter:
+    name: x86_64-pc-windows-msvc
+    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
+    runs-on: windows-2022
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Redirect googlesource fetches to GitHub mirrors
+        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
+        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
+        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
+        shell: bash
+        run: |
+          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
+          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
+          git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
+
+      - name: Restore bridge files from R2
+        shell: bash
+        run: |
+          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          mv ./src/generated_bridge.dart ./flutter/lib/
+          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
+          mv ./src/bridge_generated.h ./flutter/macos/Runner/
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install flutter
+        id: flutter
+        uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225  # v2.12.0; https://github.com/subosito/flutter-action/issues/277
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: x64
+
+      # https://github.com/flutter/flutter/issues/155685
+      # x64 only: the rustdesk/engine windows-x64-release.zip is built for the
+      # 3.24-era x64 engine (matches FLUTTER_VERSION).
+      - name: Replace engine with rustdesk custom flutter engine
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+          $engineZipTmp = Join-Path $PWD ([System.IO.Path]::GetRandomFileName() + ".zip")
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile $engineZipTmp
+          Move-Item -Force $engineZipTmp windows-x64-release.zip
+
+      - name: Install custom flutter engine
+        run: |
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+
+      - name: Patch flutter
+        # x64 stays on Flutter 3.24.5, which needs the dropdown filter patch.
+        shell: bash
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
+          cd $(dirname $(dirname $(which flutter)))
+          [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]] && git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: windows-2022
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        # googlesource.com (aom/libyuv 等 port 源) 偶发 HTTP 502, 带重试
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+          USE_AOM_391: 1
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 180
+          max_attempts: 3
+          retry_wait_seconds: 120
+          shell: bash
+          command: |
+            if ! $VCPKG_ROOT/vcpkg \
+              install \
+              --triplet x64-windows-static \
+              --x-install-root="$VCPKG_ROOT/installed"; then
+              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+                echo "$_1:"
+                echo "======"
+                cat "$_1"
+                echo "======"
+                echo ""
+              done
+              exit 1
+            fi
+            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-x64-windows-static-rel-out.log" || true
+
+      - name: Prefetch cargo dependencies with retry
+        # cargo 的 git 依赖 (如 rust-webm 的 libwebm 子模块, 指向 chromium.googlesource.com)
+        # 偶发 HTTP 502 会直接让 build.py 里的 cargo build 失败; 先带重试地 fetch 预热,
+        # 之后 cargo build 直接命中本地 checkout, 不再需要联网
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 20
+          max_attempts: 3
+          retry_wait_seconds: 60
+          shell: bash
+          command: cargo fetch --locked
+
+      - name: Build rustdesk
+        run: |
+          # Windows: build RustDesk
+          # --hwcodec is shared by all Windows targets; --vram is the x64 extra
+          python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          mv ./flutter/build/windows/x64/runner/Release ./rustdesk
+
+      - name: Download usbmmidd_v2 with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            $tmpZip = Join-Path $PWD.Path ("usbmmidd_v2.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpZip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
+            Move-Item -Force $tmpZip .\usbmmidd_v2.zip
+
+      - name: Extract usbmmidd_v2
+        run: |
+          Expand-Archive usbmmidd_v2.zip -DestinationPath .
+          Remove-Item -Path usbmmidd_v2\Win32 -Recurse
+          Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
+          mv -Force .\usbmmidd_v2 ./rustdesk
+
+      - name: Download printer driver files with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            $tmpDriver = Join-Path $PWD.Path ("rustdesk_printer_driver_v4-1.4.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            $tmpAdapter = Join-Path $PWD.Path ("printer_driver_adapter.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            $tmpChecksums = Join-Path $PWD.Path ("sha256sums.{0}" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpDriver https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpAdapter https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip
+            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpChecksums https://github.com/rustdesk/hbb_common/releases/download/driver/sha256sums
+            Move-Item -Force $tmpDriver rustdesk_printer_driver_v4-1.4.zip
+            Move-Item -Force $tmpAdapter printer_driver_adapter.zip
+            Move-Item -Force $tmpChecksums sha256sums
+
+      - name: Install printer driver files
+        run: |
+          try {
+            # Check and move the files
+            $checksum_driver = (Select-String -Path .\sha256sums -Pattern '^([a-fA-F0-9]{64}) \*rustdesk_printer_driver_v4-1.4\.zip$').Matches.Groups[1].Value
+            $downloadsum_driver = Get-FileHash -Path rustdesk_printer_driver_v4-1.4.zip -Algorithm SHA256
+            $checksum_adapter = (Select-String -Path .\sha256sums -Pattern '^([a-fA-F0-9]{64}) \*printer_driver_adapter\.zip$').Matches.Groups[1].Value
+            $downloadsum_adapter = Get-FileHash -Path printer_driver_adapter.zip -Algorithm SHA256
+            if ($checksum_driver -eq $downloadsum_driver.Hash -and $checksum_adapter -eq $downloadsum_adapter.Hash) {
+                Write-Output "rustdesk_printer_driver_v4-1.4, checksums match, extract the file."
+                Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath .
+                mkdir ./rustdesk/drivers
+                mv -Force .\rustdesk_printer_driver_v4-1.4 ./rustdesk/drivers/RustDeskPrinterDriver
+                Expand-Archive printer_driver_adapter.zip -DestinationPath .
+                mv -Force .\printer_driver_adapter.dll ./rustdesk
+            } elseif ($checksum_driver -ne $downloadsum_driver.Hash) {
+                Write-Output "rustdesk_printer_driver_v4-1.4, checksums do not match, ignore the file."
+            } else {
+                Write-Output "printer_driver_adapter.dll, checksums do not match, ignore the file."
+            }
+          } catch {
+              Write-Host "Ingore the printer driver error."
+          }
+
+      - name: find Runner.res
+        # Windows: find Runner.res (compiled from ./flutter/windows/runner/Runner.rc), copy to ./Runner.res
+        # Runner.rc does not contain actual version, but Runner.res does
+        continue-on-error: true
+        shell: bash
+        run: |
+          runner_res=$(find . -name "Runner.res");
+          if [ "$runner_res" == "" ]; then
+            echo "Runner.res: not found";
+          else
+            echo "Runner.res: $runner_res";
+            cp $runner_res ./libs/portable/Runner.res;
+            echo "list ./libs/portable/Runner.res";
+            ls -l ./libs/portable/Runner.res;
+          fi
+
+      - name: Download RustDeskTempTopMostWindow from R2
+        shell: bash
+        run: |
+          mkdir -p ./rustdesk
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/topmostwindow/x64/WindowInjection.dll ./rustdesk/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+      - name: Sign rustdesk files
+        if: env.SIGN_BASE_URL != '-2'
+        shell: bash
+        run: |
+          pip3 install requests argparse
+          BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./rustdesk/
+
+      - name: Build self-extracted executable
+        shell: bash
+        run: |
+          sed -i '/dpiAware/d' res/manifest.xml
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
+          popd
+          mkdir -p ./SignOutput
+          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-${{ env.VERSION }}-x86_64.exe
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      - name: Build msi
+        # Builds the MSI for x64. res/msi (WiX v4 + native CustomActions) carries
+        # both x64 and ARM64 platform configs; msbuild platform is x64 and the
+        # produced Package.msi is globbed since its bin/<platform>/ dir varies.
+        run: |
+          pushd ./res/msi
+          python preprocess.py --arp -d ../../rustdesk
+          nuget restore msi.sln
+          msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
+          $msi = Get-ChildItem ./Package/bin/*/Release/en-us/Package.msi | Select-Object -First 1
+          mv $msi.FullName ../../SignOutput/rustdesk-${{ env.VERSION }}-x86_64.msi
+          sha256sum ../../SignOutput/rustdesk-*.msi
+
+      - name: Sign rustdesk self-extracted file
+        if: env.SIGN_BASE_URL != '-2'
+        shell: bash
+        run: |
+          BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./SignOutput
+
+      - name: Upload to R2
+        shell: bash
+        run: |
+          DATE=$(date +%Y%m%d)
+          aws s3 cp ./SignOutput/rustdesk-${{ env.VERSION }}-x86_64.exe s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/windows/x86_64/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+          aws s3 cp ./SignOutput/rustdesk-${{ env.VERSION }}-x86_64.msi s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/windows/x86_64/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
