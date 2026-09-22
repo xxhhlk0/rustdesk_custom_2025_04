@@ -405,6 +405,14 @@ class InputModel {
     }
   }
 
+  /// Cancel any pending throttled mousemove on session close, so the stale
+  /// timer never fires into a torn-down session.
+  void disposeMouseMoveThrottle() {
+    _pendingMouseMoveTimer?.cancel();
+    _pendingMouseMoveTimer = null;
+    _pendingMouseMoveEvt = null;
+  }
+
   final WeakReference<FFI> parent;
   String keyboardMode = '';
 
@@ -444,6 +452,14 @@ class InputModel {
 
   bool _pointerMovedAfterEnter = false;
   bool _pointerInsideImage = false;
+
+  // mousemove 节流合并: 高频 PointerMoveEvent(~144Hz) 全量注入导致被控端输入事件积压,
+  // 与拖动消费率(30-60fps)不匹配产生秒级滞后。move 只发最新位置(~15ms 对齐系统
+  // coalescing), down/up/wheel 不受节流。
+  static const int _kMouseMoveThrottleUs = 15000;
+  int _lastMouseMoveSentUs = 0;
+  Timer? _pendingMouseMoveTimer;
+  Map<String, dynamic>? _pendingMouseMoveEvt;
 
   // mouse
   final isPhysicalMouse = false.obs;
@@ -1893,10 +1909,48 @@ class InputModel {
     final evtToPeer = processEventToPeer(evt, offset,
         onExit: onExit, moveCanvas: moveCanvas, edgeScroll: edgeScroll);
     if (evtToPeer != null) {
-      bind.sessionSendMouse(
-          sessionId: sessionId, msg: json.encode(modify(evtToPeer)));
+      _sendMouseToPeerThrottled(evtToPeer);
     }
     return evtToPeer;
+  }
+
+  void _sendMouseToPeer(Map<String, dynamic> evt) {
+    bind.sessionSendMouse(
+        sessionId: sessionId, msg: json.encode(modify(evt)));
+  }
+
+  void _flushPendingMouseMove() {
+    _pendingMouseMoveTimer?.cancel();
+    _pendingMouseMoveTimer = null;
+    final evt = _pendingMouseMoveEvt;
+    _pendingMouseMoveEvt = null;
+    if (evt != null) {
+      _lastMouseMoveSentUs = DateTime.now().microsecondsSinceEpoch;
+      _sendMouseToPeer(evt);
+    }
+  }
+
+  void _sendMouseToPeerThrottled(Map<String, dynamic> evt) {
+    if (evt['type'] != kMouseEventTypeDefault) {
+      // down/up: 位置只由 move 传达(x=y=0), 必须先把 pending move 冲刷出去再发
+      _flushPendingMouseMove();
+      _sendMouseToPeer(evt);
+      return;
+    }
+    final nowUs = DateTime.now().microsecondsSinceEpoch;
+    final elapsed = nowUs - _lastMouseMoveSentUs;
+    if (elapsed >= _kMouseMoveThrottleUs) {
+      _pendingMouseMoveTimer?.cancel();
+      _pendingMouseMoveTimer = null;
+      _pendingMouseMoveEvt = null;
+      _lastMouseMoveSentUs = nowUs;
+      _sendMouseToPeer(evt);
+    } else {
+      _pendingMouseMoveEvt = evt;
+      _pendingMouseMoveTimer ??= Timer(
+          Duration(microseconds: _kMouseMoveThrottleUs - elapsed),
+          _flushPendingMouseMove);
+    }
   }
 
   Point? handlePointerDevicePos(
