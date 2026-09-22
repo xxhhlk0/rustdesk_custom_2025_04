@@ -68,6 +68,33 @@ static STAT_SNAP_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 static STAT_ENC_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static STAT_SEND_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// 诊断: 单帧耗时分布 (4ms 一桶, 0-47ms 共 12 桶), 由采集/编码处累积, 每秒打印。
+// 用于确认串行流水线下单帧 cap+enc 是否偶发超 spf_target 导致掉帧。
+const DIAG_NBUCKET: usize = 12;
+fn diag_bucket(us: u64) -> usize {
+    ((us / 4000).min((DIAG_NBUCKET - 1) as u64)) as usize
+}
+fn diag_dump(arr: &[std::sync::atomic::AtomicU64; DIAG_NBUCKET]) -> ([u64; DIAG_NBUCKET], u64) {
+    let mut v = [0u64; DIAG_NBUCKET];
+    let mut total = 0u64;
+    for (i, b) in arr.iter().enumerate() {
+        v[i] = b.swap(0, std::sync::atomic::Ordering::Relaxed);
+        total += v[i];
+    }
+    (v, total)
+}
+use std::sync::atomic::AtomicU64 as AU64;
+static DIAG_CAP_BUCKETS: [AU64; DIAG_NBUCKET] = [
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+];
+static DIAG_ENC_BUCKETS: [AU64; DIAG_NBUCKET] = [
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+];
+
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
 
@@ -665,6 +692,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut stat_instant = Instant::now();
     let mut stat_loops = 0u32;
     let mut stat_would_block = 0u32;
+    // 诊断: WouldBlock 后紧贴 2ms 子轮询能拿到帧的次数(判读"微晚到可恢复" vs "窗口内真无帧")
+    let mut stat_late = 0u32;
     let mut stat_cost_us = 0u64;
     let mut stat_fetch_us = 0u64;
     let mut stat_succ = 0u32;
@@ -743,7 +772,10 @@ fn run(vs: VideoService) -> ResultType<()> {
         let stat_cap_begin = Instant::now();
         let res = match c.frame(spf) {
             Ok(frame) => {
-                stat_cap_us += stat_cap_begin.elapsed().as_micros() as u64;
+                let stat_cap_elapsed = stat_cap_begin.elapsed().as_micros() as u64;
+                stat_cap_us += stat_cap_elapsed;
+                DIAG_CAP_BUCKETS[diag_bucket(stat_cap_elapsed)]
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 stat_succ += 1;
                 repeat_encode_counter = 0;
                 if frame.valid() {
@@ -830,6 +862,10 @@ fn run(vs: VideoService) -> ResultType<()> {
         match res {
             Err(ref e) if e.kind() == WouldBlock => {
                 stat_would_block += 1;
+                // 诊断: WouldBlock 后紧贴 2ms 子轮询; 立刻拿到帧 => 新帧只是微晚到(可恢复), 仍空 => 窗口内真无帧
+                if c.frame(Duration::from_millis(2)).ok().is_some() {
+                    stat_late += 1;
+                }
                 #[cfg(windows)]
                 if try_gdi > 0 && !c.is_gdi() {
                     if try_gdi > 3 {
@@ -947,11 +983,12 @@ fn run(vs: VideoService) -> ResultType<()> {
             let stat_enc_us = STAT_ENC_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             let stat_send_us = STAT_SEND_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             log::info!(
-                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms, avg_snap={:.2}ms, avg_enc={:.1}ms, avg_send={:.1}ms",
+                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, late_poll_hit/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms, avg_snap={:.2}ms, avg_enc={:.1}ms, avg_send={:.1}ms",
                 spf.as_secs_f32() * 1000.0,
                 stat_loops as f64 * 1000.0 / stat_ms,
                 send_counter,
                 stat_would_block,
+                stat_late,
                 stat_cost_us as f64 / 1000.0 / stat_loops.max(1) as f64,
                 stat_fetch_us as f64 / 1000.0 / stat_loops.max(1) as f64,
                 stat_succ,
@@ -962,9 +999,19 @@ fn run(vs: VideoService) -> ResultType<()> {
                 stat_enc_us as f64 / 1000.0 / stat_succ_f,
                 stat_send_us as f64 / 1000.0 / stat_succ_f,
             );
+            {
+                // 单帧耗时直方图 (cap/enc), 每桶 4ms: [0-4,4-8,...40+]
+                let diag_cap = diag_dump(&DIAG_CAP_BUCKETS);
+                let diag_enc = diag_dump(&DIAG_ENC_BUCKETS);
+                log::info!(
+                    "dist cap(4ms/bucket): {:?} total={} | enc(4ms/bucket): {:?} total={}",
+                    diag_cap.0, diag_cap.1, diag_enc.0, diag_enc.1
+                );
+            }
             stat_instant = Instant::now();
             stat_loops = 0;
             stat_would_block = 0;
+            stat_late = 0;
             stat_cost_us = 0;
             stat_fetch_us = 0;
             stat_succ = 0;
@@ -1261,10 +1308,13 @@ fn handle_one_frame(
     let stat_enc_begin = Instant::now();
     match encoder.encode_to_message(frame, ms) {
         Ok(mut vf) => {
+            let stat_enc_elapsed = stat_enc_begin.elapsed().as_micros() as u64;
             STAT_ENC_US.fetch_add(
-                stat_enc_begin.elapsed().as_micros() as u64,
+                stat_enc_elapsed,
                 std::sync::atomic::Ordering::Relaxed,
             );
+            DIAG_ENC_BUCKETS[diag_bucket(stat_enc_elapsed)]
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *encode_fail_counter = 0;
             vf.display = display as _;
             let mut msg = Message::new();
