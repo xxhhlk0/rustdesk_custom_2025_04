@@ -169,10 +169,13 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 
 | 预置档 | 编码预设(preset) | 码率控制(rc) | GOP | 说明 |
 |---|---|---|---|---|
-| latency 低延迟 | Low (nvenc p1 / qsv veryfast / amf speed) | CBR | 默认 | 流畅优先 |
-| balanced 均衡（默认） | Default | CBR | 默认 | 与官方行为一致 |
-| quality 画质 | Medium (nvenc p4 / qsv medium / amf balanced) | VBR | 240 | 画质优先 + nvenc spatial AQ/multipass、amf pre-analysis |
-| custom 自定义 | 逐项 | 逐项 | 逐项 | 码率/QP/FPS/GOP/画质增强/自适应开关 |
+| latency 低延迟 | 1 - Fastest (nvenc p1 / qsv veryfast / amf speed) | CBR | 默认 | 流畅优先 |
+| balanced 均衡（默认） | 编码器默认 | CBR | 默认 | 与官方行为一致 |
+| quality 画质 | 4 - Medium (nvenc p4 / qsv medium / amf balanced) | VBR | 240 | 画质优先 + nvenc spatial AQ/multipass、amf pre-analysis |
+| custom 自定义 | 1-7 逐项 | 逐项 | 逐项 | 码率/QP/FPS/GOP/画质增强/厂商私有参数/自适应开关 |
+
+preset 统一方向：**数值越大越慢、画质越好**（1 = nvenc p1 / qsv veryfast / amf speed，
+7 = nvenc p7 / qsv veryslow / amf quality）；留空 = 用编码器默认预设（`balanced` 档即如此）。
 
 - 配置存储：全局 option `hw-encode-profile`（预置档 id 或 JSON），修改后对新会话生效
 - 按客户端覆盖：PeerConfig option `hw-encode-profile`（按 peer id），
@@ -188,21 +191,25 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
 
 | 参数 | nvenc | amf | qsv | mediacodec | VRAM 通道 |
 |---|---|---|---|---|---|
-| preset | p1 / p4 / p7 | speed / balanced / quality | veryfast / medium / veryslow | 仅 level | 不支持（SDK 内写死） |
-| rc=CBR | ✅ | ✅ | ✅ | ✅ | 不支持（固定 CBR） |
-| rc=VBR | ✅ | ✅（vbr_latency） | ✅ | ✅ | 不支持 |
-| rc=CQ（恒定 QP） | ✅ `rc=constqp` + `qp` | ✅ `rc=cqp` + `qp_i/p/b` | ✅ ICQ（`global_quality`） | ✅ `bitrate_mode=cq` | 不支持 |
-| QP(q) 范围 | 0-51 | 0-51 | 1-51 | 0-51 | — |
-| spatial AQ | ✅ `spatial-aq=1` | — | — | — | — |
-| temporal AQ | ✅ `temporal-aq=1`（部分 GPU 不支持） | — | — | — | — |
-| multipass | ✅ `qres` / `fullres` | — | — | — | — |
-| pre-analysis | — | ✅ `preanalysis=1` | — | — | — |
+| preset | 1-7 → p1-p7 | 1-7 → speed…quality | 1-7 → veryfast…veryslow | 仅 level | ✅ 1-7（三家原生 SDK） |
+| rc=CBR | ✅ | ✅ | ✅ | ✅ | ✅ |
+| rc=VBR | ✅ | ✅（vbr_latency） | ✅ | ✅ | ✅ |
+| rc=CQ（恒定 QP） | ✅ `rc=constqp` + `qp` | ✅ `rc=cqp` + `qp_i/p/b` | ✅ ICQ（`global_quality`） | ✅ `bitrate_mode=cq` | ✅ |
+| QP(q) 范围 | 0-51 | 0-51 | 1-51 | 0-51 | 0-51（qsv 取 1-51） |
+| spatial AQ | ✅ `spatial-aq=1` | — | — | — | ✅ nvenc |
+| temporal AQ | ✅ `temporal-aq=1`（部分 GPU 不支持） | — | — | — | ✅ nvenc |
+| multipass | ✅ `qres` / `fullres` | — | — | — | ✅ nvenc |
+| pre-analysis | — | ✅ `preanalysis=1` | — | — | ✅ amf |
 
+- RAM（ffmpeg）通道的 preset 只有 3 档折算：1-2 → Low(nvenc p1) / 3-5 → Medium(p4) / 6-7 → High(p7)；
+  完整的 1-7 只在 VRAM 通道生效（原生 SDK 与 ffmpeg_vram 均按数值直接映射）
 - **rc=CQ 时码率设置被忽略**：QP 直接决定画质与带宽，值越小画质越好、码率越高
 - QP 越界会被忽略并记日志；会话建立时会打印（便于核对实际生效值）：
-  - `hw encode params: name=..., quality=, rc=, q=, kbs=, fps=, gop=, bit_rate=, rc_max_rate=, global_quality=`
+  - `hw encode params: name=..., preset=, quality=, rc=, q=, kbs=, fps=, gop=, bit_rate=, rc_max_rate=, global_quality=`
   - `hw encode opened: name=..., bit_rate=, rc_max_rate=, global_quality=`
     （`avcodec_open2` 之后 ffmpeg 才真正选定码控模式，**以这一行为准**）
+  - VRAM 原生路径各自打印一行：`mfx encode params: ...` / `nvenc encode params: ...` /
+    `amf encode params: ...`，含 preset/rc/q 与全部厂商私有项的实际取值
   - `qsv rate control: ICQ(global_quality=20)`；
     若请求的模式与实际不符会记为 `qsv rate control mismatch: requested rc=... but ffmpeg will use ...`
     （QSV 没有 `rc` 选项，模式由 ffmpeg 的 `qsvenc.c select_rc_mode` 从 AVCodecContext 字段推导，
@@ -219,23 +226,29 @@ aws s3 rm s3://{R2_BUCKET}/builds/{RUN_ID}/ --recursive \
     **会去掉全部增强项自动重试一次**并记日志，不会让远程会话建不起来
   - `quality` 预置档默认开启 spatial AQ + multipass(quarter res) + pre-analysis；
     `temporal-aq` 默认关（能力门槛），仅在「自定义」档可选
-- VRAM 通道（GPU 纹理直达）仅支持 码率/FPS/GOP。VRAM 只在 legacy linux-sciter 构建中启用
-- **禁用 VRAM**：profile 自定义档可勾选 `disable_vram`（设置页"强制 RAM 硬编"），
-  被控端视频服务启动时对显示器调 `VRamEncoder::set_not_use(monitor, true)`，
-  编码协商回落 RAM 通道，preset/rc/QP/AQ 全参数生效；服务停止时自动恢复。
-  代价：GPU 纹理多一次回读到内存，延迟略增
-  （`--features inline,vram,hwcodec`）；Windows / macOS / Linux Flutter 构建的命令均未启用 vram，
-  因此上表参数对正式产物全部生效
+- **厂商私有参数**（`vendor` 字段，仅 VRAM 通道生效，设置页按厂商标注）：
+  - nvenc：`tuning`（1=ultra low latency / 2=low latency / 3=high quality）、
+    `lookahead_depth`（0=关，开启会增加延迟）、`target_quality`（VBR 目标质量）、`num_ref_frame`
+  - qsv：`cavlc`、`low_power`、`low_delay_brc`、`async_depth`、`num_ref_frame`
+  - amf：`usage`（1=ultra low latency / 2=low latency / 4=high quality）、`vbaq`、`enforce_hrd`、
+    `slices_per_frame`、`high_motion_qb`、`lowlatency_mode`、`input_queue_size`、`num_ref_frame`
+  - 三家的参数可以同时配置：hwcodec 把整串下发，各厂商只读取自己认识的 key，其余忽略
+  - 留空 = 不下发 = 保持编码器默认（qsv 的 `async_depth`/`low_power`/`low_delay_brc`
+    未配置时仍取 §3 第 8 条的吞吐修复默认值）
+- VRAM 通道（GPU 纹理直达）同样接收 preset/rc/QP/画质增强/厂商私有参数，无需回落 RAM 通道。
+  Windows Flutter 构建已启用（`python build.py --flutter --hwcodec --vram`，
+  `--features inline,vram,hwcodec`）
 
 ### 3. 依赖的 fork
 
 | 依赖 | 上游 | 本仓库指向 | 原因 |
 |---|---|---|---|
 | `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
-| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `e03451d` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth` 1→2、`low_power`/`low_delay_brc`） |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `b6ed468` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth`、`low_power`/`low_delay_brc`）+ VRAM 编码参数透传（preset 1-7 / rc / QP / 厂商私有项） |
 
 hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`、
-`cpp/ffmpeg_vram/ffmpeg_vram_encode.cpp`）：
+`cpp/ffmpeg_vram/ffmpeg_vram_{ffi.h,encode.cpp}`、`cpp/mfx/mfx_{ffi.h,encode.cpp}`、
+`cpp/nv/nv_{ffi.h,encode.cpp}`、`cpp/amf/amf_{ffi.h,encode.cpp}`、`src/vram/{mod,inner,encode}.rs`）：
 
 1. **恢复 preset 生效**：上游把 `util_encode::set_quality()` 调用注释掉了，导致 profile 的
    `preset` 字段传进 C 后完全没被使用；现已恢复（`Quality_Default` 仍是 no-op，默认行为不变）
@@ -270,5 +283,22 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
    - 三个参数都能用环境变量在运行期覆盖（改完重启 RustDesk 服务生效，无需重新构建）：
      `HWCODEC_ASYNC_DEPTH`（默认 2，设 1 退回上游行为）、`HWCODEC_QSV_LOW_POWER`（默认 1）、
      `HWCODEC_QSV_LOW_DELAY_BRC`（默认 1），设 `0` 即关闭
+9. **VRAM 编码参数透传**：新增 `opts` 通道（`key=value;key=value`），
+   `DynamicContext.opts` → 四个 `*_new_encoder()` FFI 新增 `const char *opts` 参数 →
+   `util_encode::parse_opts()` / `has_opt()` / `opt_int()` / `opt_flag()` 拆表，
+   各厂商只读自己认识的 key（未出现的 key 不下发，保持编码器默认值，即改动前的写死行为）
+   - mfx：`TargetUsage = 8 - preset`（`MFX_TARGETUSAGE_BEST_QUALITY=1`…`BEST_SPEED=7`）、
+     `rc` 1/2/3 → CBR/VBR/ICQ（ICQ 需 `q∈[1,51]`，否则回落 VBR）、`GopRefDist` 保持 1（低延迟）、
+     `async_depth`、`num_ref_frame`、`low_power`、`cavlc`、`low_delay_brc`
+   - nvenc：preset 1-7 → `NV_ENC_PRESET_P1..P7_GUID`、`tuning` 1/2/3 →
+     ULTRA_LOW_LATENCY/LOW_LATENCY/HIGH_QUALITY、`rc` 1/2/3 → CBR/VBR/CONSTQP（越界回落 CBR）、
+     `target_quality`、`spatial_aq`、`temporal_aq`、`multipass`、`lookahead_depth`、`num_ref_frame`
+   - amf：AVC 与 HEVC 各一张 quality preset 表（两套枚举值不同）、`usage` 1/2/4、
+     `rc` 1/2/3 → CBR/VBR/CQP、`vbaq`、`enforce_hrd`、`preanalysis`、`slices_per_frame`、
+     `high_motion_qb`、`lowlatency_mode`、`input_queue_size`、`num_ref_frame`
+     （HEVC 无 `MAX_NUM_REF_FRAMES`，该项只对 AVC 生效）
+   - ffmpeg_vram：`preset` 按编码器名映射（nvenc p1-p7 / qsv veryfast-veryslow / amf speed-quality），
+     qsv 额外支持 `low_power`/`low_delay_brc`/`async_depth`/`cavlc`
+   - 三家原生路径各新增一行 `mfx/nvenc/amf encode params:` 日志
 
 

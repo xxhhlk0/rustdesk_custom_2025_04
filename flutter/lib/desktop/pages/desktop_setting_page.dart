@@ -2004,11 +2004,12 @@ class _DisplayState extends State<_Display> {
   final _customGopCtrl = TextEditingController();
   bool _customAdaptive = true;
   bool _customPinFps = false;
-  bool _customDisableVram = false;
   final _customSpatialAqCtrl = TextEditingController();
   final _customTemporalAqCtrl = TextEditingController();
   final _customMultipassCtrl = TextEditingController();
   final _customPreanalysisCtrl = TextEditingController();
+  final Map<String, String> _customVendor = {};
+  final Map<String, TextEditingController> _vendorCtrls = {};
   final _hwPeerIdCtrl = TextEditingController();
   String _hwPeerProfile = 'latency';
 
@@ -2024,6 +2025,7 @@ class _DisplayState extends State<_Display> {
     _customTemporalAqCtrl.dispose();
     _customMultipassCtrl.dispose();
     _customPreanalysisCtrl.dispose();
+    _vendorCtrls.values.forEach((e) => e.dispose());
     _hwPeerIdCtrl.dispose();
     super.dispose();
   }
@@ -2055,7 +2057,20 @@ class _DisplayState extends State<_Display> {
         _customPreanalysisCtrl.text = s(map['preanalysis']);
         _customAdaptive = map['bitrate_adaptive'] != false;
         _customPinFps = map['pin_fps'] == true;
-        _customDisableVram = map['disable_vram'] == true;
+        _customVendor.clear();
+        final vendor = map['vendor'];
+        if (vendor is Map) {
+          vendor.forEach((k, v) {
+            if (v != null && '$v'.isNotEmpty) _customVendor['$k'] = '$v';
+          });
+        }
+        for (final s in _hwVendorSpecs) {
+          if (s.numeric) {
+            _vendorCtrls
+                .putIfAbsent(s.key, () => TextEditingController())
+                .text = _customVendor[s.key] ?? '';
+          }
+        }
       } catch (e) {
         debugPrint('failed to parse hw-encode-profile: $e');
       }
@@ -2074,6 +2089,11 @@ class _DisplayState extends State<_Display> {
   }
 
   String _customProfileJson() {
+    final vendor = <String, int>{};
+    _customVendor.forEach((k, v) {
+      final n = int.tryParse(v.trim());
+      if (n != null) vendor[k] = n;
+    });
     final map = <String, dynamic>{
       'id': 'custom',
       'preset': _hwParseInt(_customPresetCtrl.text),
@@ -2088,8 +2108,8 @@ class _DisplayState extends State<_Display> {
       'preanalysis': _hwParseInt(_customPreanalysisCtrl.text),
       'bitrate_adaptive': _customAdaptive,
       'pin_fps': _customPinFps,
-      'disable_vram': _customDisableVram,
     };
+    if (vendor.isNotEmpty) map['vendor'] = vendor;
     return jsonEncode(map);
   }
 
@@ -2170,6 +2190,100 @@ class _DisplayState extends State<_Display> {
     ).marginOnly(bottom: 6);
   }
 
+  // 1 = 最快/画质最低, 7 = 最慢/画质最好; 空 = 编码器默认预设
+  static const Map<String, String> _hwPresetItems = {
+    '': 'Default (encoder default)',
+    '1': '1 - Fastest (nvenc p1 / qsv veryfast / amf speed)',
+    '2': '2 - Faster (nvenc p2 / qsv faster)',
+    '3': '3 - Fast (nvenc p3 / qsv fast)',
+    '4': '4 - Medium (nvenc p4 / qsv medium / amf balanced)',
+    '5': '5 - Slow (nvenc p5 / qsv slow / amf quality)',
+    '6': '6 - Slower (nvenc p6 / qsv slower)',
+    '7': '7 - Best quality (nvenc p7 / qsv veryslow / amf quality)',
+  };
+
+  static const List<_HwOptSpec> _hwVendorSpecs = [
+    _HwOptSpec('tuning', 'Tuning (nvenc)',
+        values: ['', '1', '2', '3'],
+        labels: ['Default', 'Ultra low latency', 'Low latency', 'High quality']),
+    _HwOptSpec('lookahead_depth', 'Lookahead depth (nvenc)',
+        numeric: true, hint: 'Off if empty'),
+    _HwOptSpec('target_quality', 'Target quality (nvenc VBR)',
+        numeric: true, hint: 'Auto if empty'),
+    _HwOptSpec('num_ref_frame', 'Reference frames',
+        numeric: true, hint: 'Encoder default if empty'),
+    _HwOptSpec('cavlc', 'CAVLC (qsv)',
+        values: ['', '0', '1'], labels: ['Default', 'Off (CABAC)', 'On']),
+    _HwOptSpec('low_power', 'Low power (qsv)',
+        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
+    _HwOptSpec('low_delay_brc', 'Low delay BRC (qsv)',
+        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
+    _HwOptSpec('async_depth', 'Async depth (qsv)',
+        numeric: true, hint: 'Default if empty'),
+    _HwOptSpec('usage', 'Usage (amf)',
+        values: ['', '1', '2', '4'],
+        labels: ['Default', 'Ultra low latency', 'Low latency', 'High quality']),
+    _HwOptSpec('vbaq', 'VBAQ (amf)',
+        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
+    _HwOptSpec('enforce_hrd', 'Enforce HRD (amf)',
+        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
+    _HwOptSpec('slices_per_frame', 'Slices per frame (amf)',
+        numeric: true, hint: 'Default if empty'),
+    _HwOptSpec('high_motion_qb', 'High motion boost (amf)',
+        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
+    _HwOptSpec('lowlatency_mode', 'Low latency mode (amf)',
+        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
+    _HwOptSpec('input_queue_size', 'Input queue size (amf)',
+        numeric: true, hint: 'Default if empty'),
+  ];
+
+  List<Widget> _vendorWidgets() {
+    return _hwVendorSpecs.map((s) {
+      final v = _customVendor[s.key] ?? '';
+      if (s.numeric) {
+        return _vendorField(s);
+      }
+      return _hwDropdown(s.label, v, {
+        for (var i = 0; i < s.values.length; i++) s.values[i]: s.labels[i],
+      }, (v) {
+        if (v.isEmpty) {
+          _customVendor.remove(s.key);
+        } else {
+          _customVendor[s.key] = v;
+        }
+        _saveCustomProfile();
+        setState(() {});
+      });
+    }).toList();
+  }
+
+  Widget _vendorField(_HwOptSpec s) {
+    final ctrl = _vendorCtrls.putIfAbsent(
+        s.key, () => TextEditingController(text: _customVendor[s.key] ?? ''));
+    return Row(
+      children: [
+        SizedBox(
+            width: 120,
+            child: Text(translate(s.label), style: const TextStyle(fontSize: 13))),
+        Expanded(
+          child: TextField(
+            controller: ctrl,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(hintText: translate(s.hint)),
+            onChanged: (v) {
+              if (v.trim().isEmpty) {
+                _customVendor.remove(s.key);
+              } else {
+                _customVendor[s.key] = v.trim();
+              }
+              _saveCustomProfile();
+            },
+          ),
+        ),
+      ],
+    ).marginOnly(bottom: 6);
+  }
+
   Widget hwEncodeProfile(BuildContext context) {
     if (!(bind.mainHasHwcodec() || bind.mainHasVram())) {
       return Offstage();
@@ -2206,12 +2320,12 @@ class _DisplayState extends State<_Display> {
       if (isCustom)
         Column(children: [
           Divider(),
-          _hwDropdown('Encoder preset', _customPresetCtrl.text.isEmpty ? '0' : _customPresetCtrl.text, {
-            '0': 'Default',
-            '1': 'High (nvenc p7 / amf quality / qsv veryslow)',
-            '2': 'Medium (nvenc p4 / amf balanced / qsv medium)',
-            '3': 'Low (nvenc p1 / amf speed / qsv veryfast)',
-          }, (v) {
+          _hwDropdown(
+              'Encoder preset',
+              _hwPresetItems.containsKey(_customPresetCtrl.text)
+                  ? _customPresetCtrl.text
+                  : '',
+              _hwPresetItems, (v) {
             _customPresetCtrl.text = v;
             _saveCustomProfile();
             setState(() {});
@@ -2268,6 +2382,7 @@ class _DisplayState extends State<_Display> {
             _saveCustomProfile();
             setState(() {});
           }),
+          ..._vendorWidgets(),
           CheckboxListTile(
               dense: true,
               title: Text(translate('Allow adaptive bitrate (VideoQoS)')),
@@ -2290,21 +2405,8 @@ class _DisplayState extends State<_Display> {
                 _saveCustomProfile();
                 setState(() {});
               }),
-          CheckboxListTile(
-              dense: true,
-              title: Text(translate(
-                  'Force RAM hardware encoder (disable VRAM texture path)')),
-              subtitle: Text(
-                  translate('No longer required for preset / rate control / QP / quality enhancements (the VRAM texture path passes them through too). Keep it only to avoid the GPU texture readback - it can improve fps but slightly increases latency.'),
-                  style: const TextStyle(fontSize: 12)),
-              value: _customDisableVram,
-              onChanged: (v) {
-                _customDisableVram = v ?? false;
-                _saveCustomProfile();
-                setState(() {});
-              }),
           Text(
-            translate('Note: with CQ the bitrate setting is ignored (a lower QP means better quality and more bandwidth). Quality enhancements are encoder built-in options: spatial AQ / multipass (nvenc), pre-analysis (amf); temporal AQ is not supported by every GPU - if the encoder refuses it, the session retries once with all enhancements removed. Options the selected encoder does not support (e.g. AQ/multipass on Intel QSV) are ignored and a warning is logged - check the host log for "hw encode params" / "qsv rate control" to confirm what really took effect. The VRAM (texture) path now also passes preset / rate control / QP / enhancements through, so disabling VRAM is no longer required for them to take effect - but it still avoids the GPU texture readback and can improve fps.'),
+            translate('Preset: 1 is the fastest / lowest quality, 7 the slowest / best quality (nvenc p1-p7, qsv veryfast-veryslow, amf speed-quality). Empty keeps the encoder default. With CQ the bitrate setting is ignored (a lower QP means better quality and more bandwidth). Quality enhancements are encoder built-in options: spatial AQ / multipass (nvenc), pre-analysis (amf); temporal AQ is not supported by every GPU - if the encoder refuses it, the session retries once with all enhancements removed. Vendor options only apply to the GPU of that vendor; the others ignore them. Options the selected encoder does not support are ignored and a warning is logged - check the host log for "hw encode params" / "nvenc encode params" / "amf encode params" to confirm what really took effect.'),
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
         ]).marginOnly(left: 12),
@@ -3292,6 +3394,21 @@ _LabeledTextField(
       ),
     ],
   ).marginOnly(bottom: 8);
+}
+
+// 厂商私有编码参数的一项: key 为 hwcodec C 侧 opts 的键名, 空值表示不下发 (保持编码器默认)
+class _HwOptSpec {
+  const _HwOptSpec(this.key, this.label,
+      {this.values = const [],
+      this.labels = const [],
+      this.numeric = false,
+      this.hint = ''});
+  final String key;
+  final String label;
+  final List<String> values;
+  final List<String> labels;
+  final bool numeric;
+  final String hint;
 }
 
 class _CountDownButton extends StatefulWidget {

@@ -69,9 +69,12 @@ zbus = { version = "3.15", optional = true }
 # + mfx 异步: MORE_DATA 不再当致命错误 (否则硬件探测失败 -> vram_encode=[] 禁用硬编)
 # + qsv/vaapi hw_async_depth 默认改回 1 (async_depth=2 时首帧不出包, 会被运行时
 #   误判降级到 AV1 软编; 改 1 首帧即出, 不降级, 与 Sunshine 取值一致)
+# + VRAM 编码参数透传: *_new_encoder FFI 追加 opts (key=value;key=value),
+#   mfx/nvenc/amf 原生路径按 preset(1-7)/rc/q 与厂商私有项映射到各自 SDK,
+#   ffmpeg_vram 补 preset 映射与 qsv 选项 (不配置时行为不变)
 # branch: vram-profile
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "4d86853adfd8c5f55a0ed6982df5d3a40aaaae0b"
+rev = "d34f21d72ea3a0fc56ed7915748d3d2fadbd7f9e"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]

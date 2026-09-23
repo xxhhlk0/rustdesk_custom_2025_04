@@ -21,15 +21,14 @@ pub const PRESET_BALANCED: &str = "balanced";
 pub const PRESET_QUALITY: &str = "quality";
 pub const PRESET_CUSTOM: &str = "custom";
 
-/// preset(编码预设), 数值与 hwcodec Quality 枚举一致
+/// preset(编码预设), 1-7: 数值越大越慢、画质越好
+/// (1 = nvenc p1 / qsv veryfast / amf speed, 7 = nvenc p7 / qsv veryslow / amf quality)
 #[allow(dead_code)]
-pub const PRESET_DEFAULT: i32 = 0;
+pub const PRESET_FASTEST: i32 = 1;
 #[allow(dead_code)]
-pub const PRESET_HIGH: i32 = 1;
+pub const PRESET_MEDIUM: i32 = 4;
 #[allow(dead_code)]
-pub const PRESET_MEDIUM: i32 = 2;
-#[allow(dead_code)]
-pub const PRESET_LOW: i32 = 3;
+pub const PRESET_SLOWEST: i32 = 7;
 
 /// rc(码率控制), 数值与 hwcodec RateControl 枚举一致
 #[allow(dead_code)]
@@ -39,7 +38,6 @@ pub const RC_CBR: i32 = 1;
 #[allow(dead_code)]
 pub const RC_VBR: i32 = 2;
 /// 恒定 QP: nvenc rc=constqp+qp / amf rc=cqp+qp_i|p|b / qsv ICQ / mediacodec bitrate_mode=cq
-/// (仅 ffmpeg 硬编通道; VRAM 通道未接 rc)
 #[allow(dead_code)]
 pub const RC_CQ: i32 = 3;
 
@@ -55,7 +53,7 @@ pub const MULTIPASS_FULL: i32 = 2;
 pub struct HwEncodeProfile {
     #[serde(default = "default_id")]
     pub id: String,
-    /// 编码预设: 0=Default 1=High 2=Medium 3=Low
+    /// 编码预设: 1-7, 越大越慢画质越好; None = 编码器默认预设
     #[serde(default)]
     pub preset: Option<i32>,
     /// 码率控制: 0=DEFAULT 1=CBR 2=VBR 3=CQ
@@ -96,14 +94,64 @@ pub struct HwEncodeProfile {
     /// amf pre-analysis; 0=off 1=on
     #[serde(default)]
     pub preanalysis: Option<i32>,
+    /// 厂商私有参数 (按编码器厂商分组, 只对 VRAM 通道生效)
+    #[serde(default)]
+    pub vendor: HwVendorOpts,
     /// 是否允许 VideoQoS 运行期动态调整码率
     #[serde(default = "default_true")]
     pub bitrate_adaptive: bool,
-    /// 禁用 VRAM(GPU 纹理直达)编码通道, 强制走 RAM 硬编通道。
-    /// VRAM 通道只支持 fps/码率/GOP; preset/rc/QP/AQ 等参数仅 RAM 通道生效,
-    /// 需要全参数生效时打开此开关 (代价: 多一次 GPU->CPU 纹理回读)。
+}
+
+/// 厂商私有编码参数。各厂商只读取自己认识的 key, 因此三家的参数可以同时下发,
+/// 未被当前硬件选中的厂商的参数会被忽略 (主机日志 "hw encode params" 可见实际取值)。
+/// 统一约定: 0/1 为开关 (1=on), 其余按各自枚举语义。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HwVendorOpts {
+    /// nvenc 调优方向: 1=ultra low latency 2=low latency (编码器默认) 3=high quality
     #[serde(default)]
-    pub disable_vram: bool,
+    pub tuning: Option<i32>,
+    /// nvenc 前向预测深度; 0=关闭 (默认, 不增加延迟), 越大越慢画质越好
+    #[serde(default)]
+    pub lookahead_depth: Option<i32>,
+    /// nvenc VBR 目标质量 0-51 (0=自动); 仅 VBR 生效, 越大画质越差
+    #[serde(default)]
+    pub target_quality: Option<i32>,
+    /// 参考帧数 (nvenc/mfx/amf); 越大画质越好、延迟略增
+    #[serde(default)]
+    pub num_ref_frame: Option<i32>,
+    /// qsv 关闭 CABAC 用 CAVLC: 0=off 1=on (码率换兼容性, 一般不开)
+    #[serde(default)]
+    pub cavlc: Option<i32>,
+    /// qsv 低功耗编码 (VDENC): 0=off 1=on
+    #[serde(default)]
+    pub low_power: Option<i32>,
+    /// qsv 低延迟码控: 0=off 1=on
+    #[serde(default)]
+    pub low_delay_brc: Option<i32>,
+    /// qsv 编码队列深度; 越大吞吐越好但延迟越高
+    #[serde(default)]
+    pub async_depth: Option<i32>,
+    /// amf 用途: 1=ultra low latency 2=low latency 4=high quality
+    #[serde(default)]
+    pub usage: Option<i32>,
+    /// amf 自适应量化: 0=off 1=on
+    #[serde(default)]
+    pub vbaq: Option<i32>,
+    /// amf 强制 HRD (码率严格合规): 0=off 1=on
+    #[serde(default)]
+    pub enforce_hrd: Option<i32>,
+    /// amf 每帧 slice 数; 越多越利于丢包恢复, 码率略增
+    #[serde(default)]
+    pub slices_per_frame: Option<i32>,
+    /// amf 高运动画面质量增强: 0=off 1=on
+    #[serde(default)]
+    pub high_motion_qb: Option<i32>,
+    /// amf 低延迟模式: 0=off 1=on (默认 on)
+    #[serde(default)]
+    pub lowlatency_mode: Option<i32>,
+    /// amf 输入队列深度; 越大吞吐越好但延迟越高
+    #[serde(default)]
+    pub input_queue_size: Option<i32>,
 }
 
 fn default_id() -> String {
@@ -129,8 +177,8 @@ impl Default for HwEncodeProfile {
             temporal_aq: None,
             multipass: None,
             preanalysis: None,
+            vendor: HwVendorOpts::default(),
             bitrate_adaptive: true,
-            disable_vram: false,
         }
     }
 }
@@ -138,8 +186,8 @@ impl Default for HwEncodeProfile {
 impl HwEncodeProfile {
     fn validate(mut self) -> Option<Self> {
         if let Some(v) = self.preset {
-            if !(PRESET_DEFAULT..=PRESET_LOW).contains(&v) {
-                log::warn!("hw-encode-profile: preset {v} 越界, 忽略");
+            if !(PRESET_FASTEST..=PRESET_SLOWEST).contains(&v) {
+                log::warn!("hw-encode-profile: preset {v} 越界(1-7), 忽略");
                 self.preset = None;
             }
         }
@@ -198,7 +246,42 @@ impl HwEncodeProfile {
         self.spatial_aq = check01(self.spatial_aq, "spatial_aq");
         self.temporal_aq = check01(self.temporal_aq, "temporal_aq");
         self.preanalysis = check01(self.preanalysis, "preanalysis");
+        self.vendor.validate();
         Some(self)
+    }
+}
+
+impl HwVendorOpts {
+    fn validate(&mut self) {
+        fn check(v: Option<i32>, name: &str, min: i32, max: i32) -> Option<i32> {
+            if let Some(v) = v {
+                if !(min..=max).contains(&v) {
+                    log::warn!("hw-encode-profile: {name} {v} 越界({min}-{max}), 忽略");
+                    return None;
+                }
+            }
+            v
+        }
+        self.tuning = check(self.tuning, "tuning", 1, 3);
+        self.lookahead_depth = check(self.lookahead_depth, "lookahead_depth", 0, 64);
+        self.target_quality = check(self.target_quality, "target_quality", 0, 51);
+        self.num_ref_frame = check(self.num_ref_frame, "num_ref_frame", 0, 16);
+        self.cavlc = check(self.cavlc, "cavlc", 0, 1);
+        self.low_power = check(self.low_power, "low_power", 0, 1);
+        self.low_delay_brc = check(self.low_delay_brc, "low_delay_brc", 0, 1);
+        self.async_depth = check(self.async_depth, "async_depth", 1, 64);
+        if let Some(v) = self.usage {
+            if !matches!(v, 1 | 2 | 4) {
+                log::warn!("hw-encode-profile: usage {v} 非法(1/2/4), 忽略");
+                self.usage = None;
+            }
+        }
+        self.vbaq = check(self.vbaq, "vbaq", 0, 1);
+        self.enforce_hrd = check(self.enforce_hrd, "enforce_hrd", 0, 1);
+        self.slices_per_frame = check(self.slices_per_frame, "slices_per_frame", 0, 32);
+        self.high_motion_qb = check(self.high_motion_qb, "high_motion_qb", 0, 1);
+        self.lowlatency_mode = check(self.lowlatency_mode, "lowlatency_mode", 0, 1);
+        self.input_queue_size = check(self.input_queue_size, "input_queue_size", 1, 64);
     }
 }
 
@@ -207,7 +290,7 @@ pub fn preset(id: &str) -> Option<HwEncodeProfile> {
     match id {
         PRESET_LATENCY => Some(HwEncodeProfile {
             id: PRESET_LATENCY.to_owned(),
-            preset: Some(PRESET_LOW),    // nvenc p1 / qsv veryfast / amf speed
+            preset: Some(PRESET_FASTEST), // nvenc p1 / qsv veryfast / amf speed
             rc: Some(RC_CBR),
             gop: None,
             ..Default::default()
@@ -331,12 +414,6 @@ pub fn bitrate_adaptive() -> bool {
     active_profile().map(|p| p.bitrate_adaptive).unwrap_or(true)
 }
 
-/// 当前是否禁用 VRAM 编码通道 (默认不禁用)
-#[cfg_attr(not(feature = "vram"), allow(dead_code))]
-pub fn disable_vram() -> bool {
-    active_profile().map(|p| p.disable_vram).unwrap_or(false)
-}
-
 /// 需要锁定的出帧帧率。Some(fps) 表示忽略 VideoQoS 的帧率自适应, 固定以此帧率出帧;
 /// None = 保持上游行为 (起始 15fps, 由 VideoQoS 按延迟爬升/下降)。
 pub fn pinned_fps() -> Option<u32> {
@@ -348,11 +425,34 @@ pub fn pinned_fps() -> Option<u32> {
 }
 
 /// 转换为 scrap 编码器参数; record=true 时 gop 覆盖让位给录制用的 240 帧关键帧间隔。
-/// VRAM 通道 (hwcodec vram-profile 起) 同样接收 preset/rc/q/画质增强。
+/// VRAM 通道 (hwcodec vram-profile 起) 同样接收 preset/rc/q/画质增强/厂商私有参数。
 #[cfg(feature = "hwcodec")]
 pub fn hw_params(record: bool) -> Option<scrap::codec::HwEncoderParams> {
     let p = active_profile()?;
     let gop = if record { None } else { p.gop };
+    let v = &p.vendor;
+    let mut vendor = Vec::<(String, i32)>::new();
+    for (k, val) in [
+        ("tuning", v.tuning),
+        ("lookahead_depth", v.lookahead_depth),
+        ("target_quality", v.target_quality),
+        ("num_ref_frame", v.num_ref_frame),
+        ("cavlc", v.cavlc),
+        ("low_power", v.low_power),
+        ("low_delay_brc", v.low_delay_brc),
+        ("async_depth", v.async_depth),
+        ("usage", v.usage),
+        ("vbaq", v.vbaq),
+        ("enforce_hrd", v.enforce_hrd),
+        ("slices_per_frame", v.slices_per_frame),
+        ("high_motion_qb", v.high_motion_qb),
+        ("lowlatency_mode", v.lowlatency_mode),
+        ("input_queue_size", v.input_queue_size),
+    ] {
+        if let Some(val) = val {
+            vendor.push((k.to_owned(), val));
+        }
+    }
     Some(scrap::codec::HwEncoderParams {
         preset: p.preset,
         rc: p.rc,
@@ -364,6 +464,7 @@ pub fn hw_params(record: bool) -> Option<scrap::codec::HwEncoderParams> {
         temporal_aq: p.temporal_aq.map(|v| v > 0),
         multipass: p.multipass,
         preanalysis: p.preanalysis.map(|v| v > 0),
+        vendor,
     })
 }
 
@@ -375,7 +476,7 @@ mod test {
     fn test_parse_preset_id() {
         let p = parse_profile("latency").unwrap();
         assert_eq!(p.id, "latency");
-        assert_eq!(p.preset, Some(PRESET_LOW));
+        assert_eq!(p.preset, Some(PRESET_FASTEST));
         assert_eq!(p.rc, Some(RC_CBR));
         assert!(parse_profile("balanced").unwrap().preset.is_none());
         assert!(parse_profile("unknown-preset").is_none());
@@ -384,16 +485,18 @@ mod test {
 
     #[test]
     fn test_parse_json_and_validate() {
-        let p = parse_profile(r#"{"id":"custom","preset":2,"rc":2,"kbs":8000,"fps":60}"#).unwrap();
+        let p = parse_profile(r#"{"id":"custom","preset":4,"rc":2,"kbs":8000,"fps":60}"#).unwrap();
         assert_eq!(p.preset, Some(PRESET_MEDIUM));
         assert_eq!(p.rc, Some(RC_VBR));
         assert_eq!(p.kbs, Some(8000));
         assert_eq!(p.fps, Some(60));
         assert!(p.bitrate_adaptive);
-        // 越界回退
+        // 越界回退 (preset 只有 1-7)
         let p = parse_profile(r#"{"preset":9,"kbs":999999}"#).unwrap();
         assert_eq!(p.preset, None);
         assert_eq!(p.kbs, None);
+        let p = parse_profile(r#"{"preset":0}"#).unwrap();
+        assert_eq!(p.preset, None);
         // 非法 JSON
         assert!(parse_profile("{bad json").is_none());
     }
@@ -437,15 +540,25 @@ mod test {
     }
 
     #[test]
-    fn test_disable_vram() {
-        // 默认不禁用
-        assert!(!parse_profile("latency").unwrap().disable_vram);
-        // JSON 可开启
-        let p = parse_profile(r#"{"id":"custom","disable_vram":true}"#).unwrap();
-        assert!(p.disable_vram);
-        // 缺省为 false
-        let p = parse_profile(r#"{"id":"custom","fps":60}"#).unwrap();
-        assert!(!p.disable_vram);
+    fn test_vendor_opts() {
+        // 缺省不下发任何厂商私有参数
+        let p = parse_profile("latency").unwrap();
+        assert_eq!(p.vendor, HwVendorOpts::default());
+        // 三家可以同时配置
+        let p = parse_profile(
+            r#"{"id":"custom","vendor":{"tuning":3,"cavlc":1,"usage":4,"async_depth":4}}"#,
+        )
+        .unwrap();
+        assert_eq!(p.vendor.tuning, Some(3));
+        assert_eq!(p.vendor.cavlc, Some(1));
+        assert_eq!(p.vendor.usage, Some(4));
+        assert_eq!(p.vendor.async_depth, Some(4));
+        // 越界丢弃
+        let p = parse_profile(r#"{"id":"custom","vendor":{"tuning":9,"cavlc":5,"usage":3}}"#)
+            .unwrap();
+        assert_eq!(p.vendor.tuning, None);
+        assert_eq!(p.vendor.cavlc, None);
+        assert_eq!(p.vendor.usage, None);
     }
 
     #[test]

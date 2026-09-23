@@ -62,8 +62,9 @@ pub enum EncoderCfg {
 
 /// 用户可选的硬件编码参数 (来自编码 profile, 详见 rustdesk 侧 hw_encode_profile 模块)。
 /// 数值语义与 hwcodec 的 Quality / RateControl 枚举一一对应:
-/// - preset: 0=Default 1=High 2=Medium 3=Low
-///           (nvenc p7/p4/p1, qsv veryslow/medium/veryfast, amf quality/balanced/speed)
+/// - preset: 1-7, 越大越慢画质越好 (1 = nvenc p1 / qsv veryfast / amf speed,
+///           7 = nvenc p7 / qsv veryslow / amf quality);
+///           None = 编码器默认 preset
 /// - rc:     0=DEFAULT 1=CBR 2=VBR 3=CQ / 恒定 QP (配合 q;
 ///           nvenc rc=constqp+qp, amf rc=cqp+qp_i|p|b, qsv ICQ, mediacodec bitrate_mode=cq)
 /// - kbs:    None = 按 base_bitrate×ratio 自动推导; rc=CQ 时被忽略
@@ -73,8 +74,10 @@ pub enum EncoderCfg {
 ///   multipass: 1 = two pass quarter res, 2 = two pass full res。
 ///   注: temporal AQ 在部分 GPU 上不受支持, hwcodec 会在编码器初始化失败时
 ///   自动去掉增强项重试一次。
+/// - vendor: 厂商私有参数, 键名即 hwcodec C 侧 opts 的 key (tuning/cavlc/usage/...),
+///   各厂商只读取自己认识的 key, 因此三家可以一起下发。
 /// 注意: VRAM 通道历史上仅支持 kbs/fps/gop; hwcodec vram-profile 分支起
-/// preset/rc/q/画质增强 也会透传到 C 侧 (DynamicContext)。
+/// preset/rc/q/画质增强/厂商私有参数 也会透传到 C 侧 (DynamicContext)。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HwEncoderParams {
     pub preset: Option<i32>,
@@ -87,6 +90,7 @@ pub struct HwEncoderParams {
     pub temporal_aq: Option<bool>,
     pub multipass: Option<i32>,
     pub preanalysis: Option<bool>,
+    pub vendor: Vec<(String, i32)>,
 }
 
 pub trait EncoderApi {

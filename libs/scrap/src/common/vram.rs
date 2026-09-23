@@ -93,6 +93,39 @@ impl EncoderApi for VRamEncoder {
                     Some(v) => v,
                     None => 1,
                 };
+                // 厂商私有参数串, 键名与 hwcodec C 侧 opts 一致; 各厂商只读取自己认识的 key,
+                // 因此三家的参数可以一起下发 (未配置的 key 不下发, 保持编码器默认)
+                let mut vendor_opts = Vec::<(String, String)>::new();
+                let mut push = |k: &str, v: i32| vendor_opts.push((k.to_owned(), v.to_string()));
+                if let Some(v) = params.preset {
+                    push("preset", v);
+                }
+                if let Some(v) = params.rc {
+                    push("rc", v);
+                }
+                if let Some(v) = params.q {
+                    push("q", v);
+                }
+                if let Some(v) = params.spatial_aq {
+                    push("spatial_aq", v as i32);
+                }
+                if let Some(v) = params.temporal_aq {
+                    push("temporal_aq", v as i32);
+                }
+                if let Some(v) = params.multipass {
+                    push("multipass", v);
+                }
+                if let Some(v) = params.preanalysis {
+                    push("preanalysis", v as i32);
+                }
+                for (k, v) in params.vendor.iter() {
+                    push(k, *v);
+                }
+                let opts = vendor_opts
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(";");
                 let ctx = EncodeContext {
                     f: config.feature.clone(),
                     d: DynamicContext {
@@ -109,6 +142,7 @@ impl EncoderApi for VRamEncoder {
                         temporal_aq: params.temporal_aq.unwrap_or(false),
                         multipass: params.multipass.unwrap_or(0),
                         preanalysis: params.preanalysis.unwrap_or(false),
+                        opts,
                     },
                 };
                 match Encoder::new(ctx.clone()) {

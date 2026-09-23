@@ -45,9 +45,9 @@ lazy_static::lazy_static! {
 /// 编码预设与码率控制枚举映射 (数值语义见 codec.rs HwEncoderParams)
 pub(crate) fn map_quality(v: i32) -> Quality {
     match v {
-        1 => Quality_High,
-        2 => Quality_Medium,
-        3 => Quality_Low,
+        1..=2 => Quality_Low,
+        3..=5 => Quality_Medium,
+        6..=7 => Quality_High,
         _ => Quality_Default,
     }
 }
