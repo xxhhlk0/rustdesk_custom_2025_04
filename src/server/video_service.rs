@@ -692,8 +692,6 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut stat_instant = Instant::now();
     let mut stat_loops = 0u32;
     let mut stat_would_block = 0u32;
-    // 诊断: WouldBlock 后紧贴 2ms 子轮询能拿到帧的次数(判读"微晚到可恢复" vs "窗口内真无帧")
-    let mut stat_late = 0u32;
     let mut stat_cost_us = 0u64;
     let mut stat_fetch_us = 0u64;
     let mut stat_succ = 0u32;
@@ -770,7 +768,10 @@ fn run(vs: VideoService) -> ResultType<()> {
         let time = now - start;
         let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
         let stat_cap_begin = Instant::now();
-        let res = match c.frame(spf) {
+        // 按 present 节奏取帧: 阻塞等下一帧到达, 不用固定周期截断取帧窗口。
+        // 超时只为让静止画面上的循环继续轮转, 不丢帧 (下一轮会等到同一帧)。
+        const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(50);
+        let res = match c.frame(ACQUIRE_TIMEOUT) {
             Ok(frame) => {
                 let stat_cap_elapsed = stat_cap_begin.elapsed().as_micros() as u64;
                 stat_cap_us += stat_cap_elapsed;
@@ -862,10 +863,6 @@ fn run(vs: VideoService) -> ResultType<()> {
         match res {
             Err(ref e) if e.kind() == WouldBlock => {
                 stat_would_block += 1;
-                // 诊断: WouldBlock 后紧贴 2ms 子轮询; 立刻拿到帧 => 新帧只是微晚到(可恢复), 仍空 => 窗口内真无帧
-                if c.frame(Duration::from_millis(2)).ok().is_some() {
-                    stat_late += 1;
-                }
                 #[cfg(windows)]
                 if try_gdi > 0 && !c.is_gdi() {
                     if try_gdi > 3 {
@@ -983,12 +980,11 @@ fn run(vs: VideoService) -> ResultType<()> {
             let stat_enc_us = STAT_ENC_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             let stat_send_us = STAT_SEND_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             log::info!(
-                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, late_poll_hit/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms, avg_snap={:.2}ms, avg_enc={:.1}ms, avg_send={:.1}ms",
+                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms, avg_snap={:.2}ms, avg_enc={:.1}ms, avg_send={:.1}ms",
                 spf.as_secs_f32() * 1000.0,
                 stat_loops as f64 * 1000.0 / stat_ms,
                 send_counter,
                 stat_would_block,
-                stat_late,
                 stat_cost_us as f64 / 1000.0 / stat_loops.max(1) as f64,
                 stat_fetch_us as f64 / 1000.0 / stat_loops.max(1) as f64,
                 stat_succ,
@@ -1011,7 +1007,6 @@ fn run(vs: VideoService) -> ResultType<()> {
             stat_instant = Instant::now();
             stat_loops = 0;
             stat_would_block = 0;
-            stat_late = 0;
             stat_cost_us = 0;
             stat_fetch_us = 0;
             stat_succ = 0;
