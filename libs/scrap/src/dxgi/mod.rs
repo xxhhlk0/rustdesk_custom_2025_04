@@ -49,6 +49,7 @@ pub struct Capturer {
     fastlane: bool,
     surface: ComPtr<IDXGISurface>,
     texture: ComPtr<ID3D11Texture2D>,
+    copy_texture: ComPtr<ID3D11Texture2D>,
     width: usize,
     height: usize,
     rotated: Vec<u8>,
@@ -164,6 +165,7 @@ impl Capturer {
             fastlane: desc.DesktopImageInSystemMemory == TRUE,
             surface: ComPtr(ptr::null_mut()),
             texture: ComPtr(ptr::null_mut()),
+            copy_texture: ComPtr(ptr::null_mut()),
             width: display.width() as usize,
             height: display.height() as usize,
             display,
@@ -491,6 +493,29 @@ impl Capturer {
             );
             let texture = ComPtr(texture);
             self.texture = texture;
+
+            if !self.texture.is_null() && !self.device.is_null() && !self.context.is_null() {
+                if self.copy_texture.is_null() {
+                    let mut desc: D3D11_TEXTURE2D_DESC = mem::zeroed();
+                    (*self.texture.0).GetDesc(&mut desc);
+                    desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                    desc.CPUAccessFlags = 0;
+                    desc.MiscFlags = 0;
+                    let mut copy_texture: *mut ID3D11Texture2D = ptr::null_mut();
+                    (*self.device.0).CreateTexture2D(&desc, ptr::null(), &mut copy_texture);
+                    self.copy_texture = ComPtr(copy_texture);
+                }
+                if !self.copy_texture.is_null() {
+                    (*self.context.0).CopyResource(
+                        self.copy_texture.0 as *mut _,
+                        self.texture.0 as *mut _,
+                    );
+                    (*self.duplication.0).ReleaseFrame();
+                    (*(self.copy_texture.0 as *mut IUnknown)).AddRef();
+                    self.texture = ComPtr(self.copy_texture.0);
+                }
+            }
 
             let mut final_texture = self.texture.0 as *mut c_void;
             let mut rotation = match self.display.rotation() {
