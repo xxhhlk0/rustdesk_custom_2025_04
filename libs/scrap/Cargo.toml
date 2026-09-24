@@ -72,7 +72,7 @@ zbus = { version = "3.15", optional = true }
 # + VRAM 编码参数透传: *_new_encoder FFI 追加 opts (key=value;key=value),
 #   mfx/nvenc/amf 原生路径按 preset(1-7)/rc/q 与厂商私有项映射到各自 SDK,
 #   ffmpeg_vram 补 preset 映射与 qsv 选项 (不配置时行为不变)
-# branch: vram-profile
+# branch: custom-1.4.9
 git = "https://github.com/xxhhlk0/hwcodec"
 rev = "d34f21d72ea3a0fc56ed7915748d3d2fadbd7f9e"
 optional = true

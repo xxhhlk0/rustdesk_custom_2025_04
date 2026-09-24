@@ -76,7 +76,7 @@ pub enum EncoderCfg {
 ///   自动去掉增强项重试一次。
 /// - vendor: 厂商私有参数, 键名即 hwcodec C 侧 opts 的 key (tuning/cavlc/usage/...),
 ///   各厂商只读取自己认识的 key, 因此三家可以一起下发。
-/// 注意: VRAM 通道历史上仅支持 kbs/fps/gop; hwcodec vram-profile 分支起
+/// 注意: VRAM 通道历史上仅支持 kbs/fps/gop; 自本 hwcodec fork 起
 /// preset/rc/q/画质增强/厂商私有参数 也会透传到 C 侧 (DynamicContext)。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HwEncoderParams {
