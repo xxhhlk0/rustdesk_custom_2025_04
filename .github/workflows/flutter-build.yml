@@ -794,11 +794,23 @@ jobs:
           # flutter build ipa --release --obfuscate --split-debug-info=./split-debug-info --no-codesign
           # for easy debugging
           flutter build ipa --release --no-codesign || true
-          # 兜底: 某些 Flutter 版本只产 Runner.xcarchive 不产 ipa, 手工打 Payload
+          # 兜底: Flutter 3.24.5 在 --no-codesign 下只产 Runner.xcarchive, 会打印
+          # "Codesigning disabled with --no-codesign, skipping IPA." 且不创建 ipa 目录,
+          # 因此这里手工打 Payload。
+          # 注意: zip 的输出目录必须先存在, 否则 zip 直接报 "Could not create output file"
+          # 并以 exit 15 终止 (2026-09-24 run 35996632080 的失败点)。
+          mkdir -p build/ios/ipa
           if ! ls build/ios/ipa/*.ipa >/dev/null 2>&1; then
             echo "::warning::flutter build ipa 未产出 ipa, 回退到手工打包"
-            flutter build ios --release --no-codesign
-            APP_DIR=$(ls -d build/ios/iphoneos/Runner.app 2>/dev/null || ls -d build/ios/Release-iphoneos/Runner.app)
+            # 优先复用 xcarchive 里已构建好的 .app, 避免再跑一次完整的 flutter build ios
+            APP_DIR=$(ls -d build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app 2>/dev/null \
+                      || ls -d build/ios/iphoneos/Runner.app 2>/dev/null \
+                      || ls -d build/ios/Release-iphoneos/Runner.app 2>/dev/null || true)
+            if [ -z "$APP_DIR" ]; then
+              echo "::warning::未找到已构建的 Runner.app, 重新执行 flutter build ios"
+              flutter build ios --release --no-codesign
+              APP_DIR=$(ls -d build/ios/iphoneos/Runner.app 2>/dev/null || ls -d build/ios/Release-iphoneos/Runner.app)
+            fi
             IPA_OUT="$(pwd)/build/ios/ipa/rustdesk-${{ env.VERSION }}-ios-unsigned.ipa"
             rm -rf /tmp/ipa_payload
             mkdir -p /tmp/ipa_payload/Payload
@@ -1434,6 +1446,42 @@ jobs:
           echo "ANDROID_SIGN_TOOL_VERSION=$BUILD_TOOL_VERSION" >> $GITHUB_ENV
           echo Last build tool version is: $BUILD_TOOL_VERSION
 
+      # 上游行为: ANDROID_SIGNING_KEY 为空时 "Sign app APK" 会被 skip, 于是静默上传
+      # debug 签名的 APK (可构建成功, 但无法覆盖安装已装版本)。此处把该情况显式化,
+      # 并在 secrets 不齐/不匹配时给出可读报错, 而不是等 apksigner 抛
+      # 含义模糊的 "keystore password was incorrect"。
+      - name: Verify signing configuration
+        shell: bash
+        env:
+          SIGNING_KEY_B64: ${{ secrets.ANDROID_SIGNING_KEY }}
+          SIGNING_ALIAS: ${{ secrets.ANDROID_ALIAS }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
+          if [ -z "$SIGNING_KEY_B64" ]; then
+            echo "::warning::ANDROID_SIGNING_KEY 未设置 -> 跳过正式签名, 产物为 debug 签名, 无法覆盖安装"
+            exit 0
+          fi
+          missing=""
+          [ -z "$SIGNING_ALIAS" ] && missing="$missing ANDROID_ALIAS"
+          [ -z "$SIGNING_STORE_PASSWORD" ] && missing="$missing ANDROID_KEY_STORE_PASSWORD"
+          [ -z "$SIGNING_KEY_PASSWORD" ] && missing="$missing ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::以下 secrets 已设置 ANDROID_SIGNING_KEY 但仍为空:$missing"
+            exit 1
+          fi
+          printf '%s' "$SIGNING_KEY_B64" | base64 -d > /tmp/signingKey.jks 2>/dev/null || {
+            echo "::error::ANDROID_SIGNING_KEY 不是合法的 base64"; exit 1; }
+          if ! keytool -list -keystore /tmp/signingKey.jks -storetype PKCS12 \
+                 -storepass "$SIGNING_STORE_PASSWORD" -alias "$SIGNING_ALIAS" >/dev/null 2>&1; then
+            echo "::error::keystore 校验失败: ANDROID_KEY_STORE_PASSWORD 或 ANDROID_ALIAS 与 keystore 不匹配"
+            echo "  本地自查: python .rd-ci/verify-android-keystore.py --keystore <ks> --b64 <ks>.b64"
+            echo "  常见原因: 网页填 secret 时带入尾随空格/换行; 生成 keystore 时密码用了双引号导致 \$ ! 被 shell 吞掉"
+            exit 1
+          fi
+          echo "签名配置校验通过 (alias=$SIGNING_ALIAS)"
+
       - uses: r0adkll/sign-android-release@349ebdef58775b1e0d8099458af0816dc79b6407 # v1
         name: Sign app APK
         if: env.ANDROID_SIGNING_KEY != null
@@ -1648,6 +1696,42 @@ jobs:
           BUILD_TOOL_VERSION=$(ls /usr/local/lib/android/sdk/build-tools/ | tail -n 1)
           echo "ANDROID_SIGN_TOOL_VERSION=$BUILD_TOOL_VERSION" >> $GITHUB_ENV
           echo Last build tool version is: $BUILD_TOOL_VERSION
+
+      # 上游行为: ANDROID_SIGNING_KEY 为空时 "Sign app APK" 会被 skip, 于是静默上传
+      # debug 签名的 APK (可构建成功, 但无法覆盖安装已装版本)。此处把该情况显式化,
+      # 并在 secrets 不齐/不匹配时给出可读报错, 而不是等 apksigner 抛
+      # 含义模糊的 "keystore password was incorrect"。
+      - name: Verify signing configuration
+        shell: bash
+        env:
+          SIGNING_KEY_B64: ${{ secrets.ANDROID_SIGNING_KEY }}
+          SIGNING_ALIAS: ${{ secrets.ANDROID_ALIAS }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
+          if [ -z "$SIGNING_KEY_B64" ]; then
+            echo "::warning::ANDROID_SIGNING_KEY 未设置 -> 跳过正式签名, 产物为 debug 签名, 无法覆盖安装"
+            exit 0
+          fi
+          missing=""
+          [ -z "$SIGNING_ALIAS" ] && missing="$missing ANDROID_ALIAS"
+          [ -z "$SIGNING_STORE_PASSWORD" ] && missing="$missing ANDROID_KEY_STORE_PASSWORD"
+          [ -z "$SIGNING_KEY_PASSWORD" ] && missing="$missing ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::以下 secrets 已设置 ANDROID_SIGNING_KEY 但仍为空:$missing"
+            exit 1
+          fi
+          printf '%s' "$SIGNING_KEY_B64" | base64 -d > /tmp/signingKey.jks 2>/dev/null || {
+            echo "::error::ANDROID_SIGNING_KEY 不是合法的 base64"; exit 1; }
+          if ! keytool -list -keystore /tmp/signingKey.jks -storetype PKCS12 \
+                 -storepass "$SIGNING_STORE_PASSWORD" -alias "$SIGNING_ALIAS" >/dev/null 2>&1; then
+            echo "::error::keystore 校验失败: ANDROID_KEY_STORE_PASSWORD 或 ANDROID_ALIAS 与 keystore 不匹配"
+            echo "  本地自查: python .rd-ci/verify-android-keystore.py --keystore <ks> --b64 <ks>.b64"
+            echo "  常见原因: 网页填 secret 时带入尾随空格/换行; 生成 keystore 时密码用了双引号导致 \$ ! 被 shell 吞掉"
+            exit 1
+          fi
+          echo "签名配置校验通过 (alias=$SIGNING_ALIAS)"
 
       - uses: r0adkll/sign-android-release@349ebdef58775b1e0d8099458af0816dc79b6407 # v1
         name: Sign app APK
