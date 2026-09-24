@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	越狱版专用 entitlements（由 CI 用 `ldid -S<本文件> <Runner 二进制>` 注入）。
+
+	为什么需要：flutter build ipa 的 no-codesign 模式产出的 app 完全没有签名块，
+	installd 会以
+	  "Application is missing the application-identifier entitlement"
+	拒绝安装（Apple TN2319）。注入 application-identifier 后即可安装。
+
+	注意：本文件不参与 Xcode 构建（未登记在 project.pbxproj 中），
+	只被 CI 的打包步骤读取，因此不影响正常的签名构建流程。
+-->
+<plist version="1.0">
+<dict>
+	<!-- ===== 必需项 ===== -->
+	<!-- 缺失即触发 "Application is missing the application-identifier entitlement" -->
+	<key>application-identifier</key>
+	<string>com.carriez.flutterHbb</string>
+
+	<!-- ===== 越狱环境增强项（均可单独删除） ===== -->
+	<!-- 越过沙箱，越狱设备上的标准提权项 -->
+	<key>platform-application</key>
+	<true/>
+
+	<!-- 允许 lldb 等调试器附加 -->
+	<key>get-task-allow</key>
+	<true/>
+
+	<!-- 提升内存上限，对视频编解码链路有帮助 -->
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+
+	<!-- 允许解析系统网络服务，避免被沙箱拦在 mach-lookup -->
+	<key>com.apple.security.exception.mach-lookup.global-name</key>
+	<array>
+		<string>com.apple.nsurlsessiond</string>
+		<string>com.apple.nsurlsessiond.NSURLSessionProxyService</string>
+	</array>
+
+	<!--
+		刻意不包含：
+		1) aps-environment / com.apple.developer.networking.wifi-info
+		   Runner.entitlements 里有，但代码中并无 UNUserNotification /
+		   registerForRemoteNotifications / CNCopyCurrentNetworkInfo 引用，
+		   且两者都是免费 Apple ID 重签时的受限项，加了反而增大安装失败面。
+		2) com.apple.private.cs.debugger / dynamic-codesigning /
+		   com.apple.private.skip-library-validation
+		   TrollStore 官方 README 明示：iOS 15 A12+ 已封禁这三项，
+		   带上的 app 启动即崩溃（需 PPL bypass 才生效）。
+	-->
+</dict>
+</plist>

@@ -786,39 +786,36 @@ jobs:
           cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
           
 
+      - name: Install ldid
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 30
+          shell: bash
+          command: brew install ldid
+
       - name: Build rustdesk
         shell: bash
         run: |
           pushd flutter
-          # 未签名 ipa: 不需要任何 Apple 证书/profile (TrollStore / 越狱 / AltStore 均可安装)
-          # flutter build ipa --release --obfuscate --split-debug-info=./split-debug-info --no-codesign
-          # for easy debugging
+          # 构建 (不需要任何 Apple 证书 / provisioning profile)
+          # 注: Flutter 3.24.5 在 no-codesign 下只产 Runner.xcarchive, 会打印
+          #     "Codesigning disabled with --no-codesign, skipping IPA." 且不创建 ipa 目录,
+          #     所以 ipa 由 .github/scripts/create-ios-ipa.sh 手工打 Payload 产出。
+          # 注: zip 的输出目录必须先存在, 否则 zip 报 "Could not create output file" 并以
+          #     exit 15 终止 (2026-09-24 run 35996632080 的失败点)。
           flutter build ipa --release --no-codesign || true
-          # 兜底: Flutter 3.24.5 在 --no-codesign 下只产 Runner.xcarchive, 会打印
-          # "Codesigning disabled with --no-codesign, skipping IPA." 且不创建 ipa 目录,
-          # 因此这里手工打 Payload。
-          # 注意: zip 的输出目录必须先存在, 否则 zip 直接报 "Could not create output file"
-          # 并以 exit 15 终止 (2026-09-24 run 35996632080 的失败点)。
           mkdir -p build/ios/ipa
-          if ! ls build/ios/ipa/*.ipa >/dev/null 2>&1; then
-            echo "::warning::flutter build ipa 未产出 ipa, 回退到手工打包"
-            # 优先复用 xcarchive 里已构建好的 .app, 避免再跑一次完整的 flutter build ios
-            APP_DIR=$(ls -d build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app 2>/dev/null \
-                      || ls -d build/ios/iphoneos/Runner.app 2>/dev/null \
-                      || ls -d build/ios/Release-iphoneos/Runner.app 2>/dev/null || true)
-            if [ -z "$APP_DIR" ]; then
-              echo "::warning::未找到已构建的 Runner.app, 重新执行 flutter build ios"
-              flutter build ios --release --no-codesign
-              APP_DIR=$(ls -d build/ios/iphoneos/Runner.app 2>/dev/null || ls -d build/ios/Release-iphoneos/Runner.app)
-            fi
-            IPA_OUT="$(pwd)/build/ios/ipa/rustdesk-${{ env.VERSION }}-ios-unsigned.ipa"
-            rm -rf /tmp/ipa_payload
-            mkdir -p /tmp/ipa_payload/Payload
-            cp -R "$APP_DIR" /tmp/ipa_payload/Payload/
-            ( cd /tmp/ipa_payload && zip -qry "$IPA_OUT" Payload )
+          if ! ls build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app >/dev/null 2>&1 \
+             && ! ls build/ios/iphoneos/Runner.app >/dev/null 2>&1; then
+            echo "::warning::未找到已构建的 Runner.app, 重新执行 flutter build ios"
+            flutter build ios --release --no-codesign
           fi
-          # Verify the ipa was created
-          ls -la build/ios/ipa/ || { echo "ERROR: IPA directory not found"; exit 1; }
+          popd
+
+          # 产出两个 ipa: 未签名版 + 越狱版 (ldid 注入 application-identifier)
+          VERSION="${{ env.VERSION }}" bash .github/scripts/create-ios-ipa.sh
 
       - name: Install AWS CLI
         uses: nick-fields/retry@v3
@@ -835,17 +832,22 @@ jobs:
         shell: bash
         run: |
           DATE=$(date +%Y%m%d)
-          # Find the actual ipa file (flutter generates rustdesk.ipa or similar)
-          IPA_FILE=$(ls flutter/build/ios/ipa/*.ipa 2>/dev/null | head -1)
-          if [ -z "$IPA_FILE" ]; then
+          DEST="s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/ios/arm64"
+          shopt -s nullglob
+          IPAS=(flutter/build/ios/ipa/*.ipa)
+          if [ ${#IPAS[@]} -eq 0 ]; then
             echo "ERROR: No .ipa file found in flutter/build/ios/ipa/"
             ls -la flutter/build/ios/ipa/ || true
             exit 1
           fi
-          echo "Found IPA file: $IPA_FILE"
-          aws s3 cp "$IPA_FILE" s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/ios/arm64/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
+          for f in "${IPAS[@]}"; do
+            echo "Uploading: $f"
+            aws s3 cp "$f" "$DEST/" \
+              --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+              --region auto
+          done
+          echo "== 已上传到 $DEST =="
+          for f in "${IPAS[@]}"; do echo "  - $(basename "$f")"; done
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
