@@ -2,6 +2,12 @@ name: Build the flutter version of the RustDesk
 
 on:
   workflow_call:
+    inputs:
+      build-ios:
+        description: "构建 iOS 未签名 ipa (TrollStore / 越狱设备 / AltStore 可用)"
+        required: false
+        type: boolean
+        default: false
 
 # NOTE: F-Droid builder script 'flutter/build_fdroid.sh' reads environment
 # variables from this workflow!
@@ -643,8 +649,11 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   build-rustdesk-ios:
-    # Disabled temporarily - iOS build issues
-    if: false
+    # 未签名 ipa: 不需要任何 Apple 证书/profile, 产物供 TrollStore / 越狱设备(AppSync Unified) /
+    # AltStore-Sideloadly 使用。默认关闭, 由调用方(flutter-nightly)的 build-ios 输入按需开启。
+    # 曾因 "iOS build issues" 被整体禁用; 本次同时把 runner 从漂移的 macos-latest 换成 macos-14
+    # (与 mac arm64 job 同镜像, 已验证可跑 Flutter 3.24.5)。
+    if: ${{ inputs.build-ios }}
     name: build rustdesk ios ipa
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
@@ -655,7 +664,8 @@ jobs:
           - {
               arch: aarch64,
               target: aarch64-apple-ios,
-              os: macos-latest,
+              # macos-latest 已漂移到更新的 Xcode, Flutter 3.24.5 需要 Xcode 15 时代镜像
+              os: macos-14,
               vcpkg-triplet: arm64-ios,
             }
     steps:
@@ -780,9 +790,21 @@ jobs:
         shell: bash
         run: |
           pushd flutter
+          # 未签名 ipa: 不需要任何 Apple 证书/profile (TrollStore / 越狱 / AltStore 均可安装)
           # flutter build ipa --release --obfuscate --split-debug-info=./split-debug-info --no-codesign
           # for easy debugging
-          flutter build ipa --release --no-codesign
+          flutter build ipa --release --no-codesign || true
+          # 兜底: 某些 Flutter 版本只产 Runner.xcarchive 不产 ipa, 手工打 Payload
+          if ! ls build/ios/ipa/*.ipa >/dev/null 2>&1; then
+            echo "::warning::flutter build ipa 未产出 ipa, 回退到手工打包"
+            flutter build ios --release --no-codesign
+            APP_DIR=$(ls -d build/ios/iphoneos/Runner.app 2>/dev/null || ls -d build/ios/Release-iphoneos/Runner.app)
+            IPA_OUT="$(pwd)/build/ios/ipa/rustdesk-${{ env.VERSION }}-ios-unsigned.ipa"
+            rm -rf /tmp/ipa_payload
+            mkdir -p /tmp/ipa_payload/Payload
+            cp -R "$APP_DIR" /tmp/ipa_payload/Payload/
+            ( cd /tmp/ipa_payload && zip -qry "$IPA_OUT" Payload )
+          fi
           # Verify the ipa was created
           ls -la build/ios/ipa/ || { echo "ERROR: IPA directory not found"; exit 1; }
 

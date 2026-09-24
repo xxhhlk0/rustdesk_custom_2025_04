@@ -2,8 +2,15 @@ name: Flutter Nightly Build
 
 on:
   workflow_dispatch:
+    inputs:
+      build-ios:
+        description: "构建 iOS 未签名 ipa (TrollStore / 越狱设备 / AltStore 可用)"
+        type: boolean
+        default: false
 
 jobs:
   run-flutter-nightly-build:
     uses: ./.github/workflows/flutter-build.yml
+    with:
+      build-ios: ${{ inputs.build-ios }}
     secrets: inherit
