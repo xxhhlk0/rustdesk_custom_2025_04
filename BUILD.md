@@ -2,7 +2,19 @@
 
 ## 概述
 
-本项目基于官方 RustDesk 1.4.9 版本进行自定义构建（已从 1.4.6 rebase 同步到上游 1.4.9 发版 tag），所有构建产物上传到 Cloudflare R2 私有存储，不依赖 GitHub Artifacts，适合公开仓库使用。
+本项目基于官方 RustDesk **1.4.9** 版本进行自定义构建（已从 1.4.6 rebase 同步到上游 1.4.9 发版 tag），所有构建产物上传到 Cloudflare R2 私有存储，不依赖 GitHub Artifacts，适合公开仓库使用。
+
+### 版本锚点
+
+| 对象 | 当前值 |
+|---|---|
+| 上游基点 | rustdesk/rustdesk `1.4.9`（`6c578292`） |
+| 自定义提交数 | **48**（`git rev-list --count 1.4.9..HEAD`） |
+| 最新 tag | `1.4.9-custom.7` |
+| 相关 fork | `xxhhlk0/hbb_common`、`xxhhlk0/hwcodec`（见「自定义功能 §5 依赖的 fork」） |
+
+> tag 命名规则：`1.4.9-custom.<N>`，每个 tag 对应一次实质功能提交。
+> 所有 workflow 均为 `workflow_dispatch`（无 push/tag 自动触发），**打 tag 不会触发构建**，需手动 dispatch。
 
 ## 主要修改
 
@@ -59,8 +71,12 @@
     ├── linux/aarch64/
     │   └── ...
     └── ios/arm64/
-        └── rustdesk-{VERSION}.ipa
+        ├── rustdesk-{VERSION}-ios-unsigned.ipa     # 纯未签名（AltStore / Sideloadly）
+        └── rustdesk-{VERSION}-ios-jailbroken.ipa   # 已注入 entitlements（越狱 / TrollStore）
 ```
+
+> iOS 两个版本均**不需要任何 Apple 证书或 provisioning profile**。
+> 详见下方「自定义功能 §3 iOS 打包」。
 
 ## 必需的 GitHub Secrets
 
@@ -77,11 +93,20 @@
 
 | Secret 名称 | 说明 |
 |------------|------|
-| `ANDROID_SIGNING_KEY` | Android 签名密钥（Base64） |
+| `ANDROID_SIGNING_KEY` | Android 签名密钥（keystore 的 Base64） |
 | `ANDROID_ALIAS` | Android 密钥别名 |
 | `ANDROID_KEY_STORE_PASSWORD` | Android 密钥库密码 |
 | `ANDROID_KEY_PASSWORD` | Android 密钥密码 |
 | `MACOS_P12_BASE64` | macOS 签名证书（Base64） |
+| `MACOS_P12_PASSWORD` | macOS 证书密码 |
+| `MACOS_CODESIGN_IDENTITY` | macOS 签名身份 |
+| `MACOS_NOTARIZE_JSON` | macOS 公证凭据 |
+
+> **Android 四个 secret 为空时不会报错**：`Sign app APK` 步骤会被跳过，
+> 上传的是 **debug 签名 APK**（构建成功但**无法覆盖安装**）。
+> 判"真签没签"看该步骤是 `success` 还是 `skipped`。详见「自定义功能 §4 Android 签名」。
+>
+> **iOS 不需要任何 secret**：未签名版与越狱版都不依赖 Apple 证书。
 
 ## 自定义服务器配置
 
@@ -104,10 +129,18 @@
 
 1. 进入 GitHub 仓库 → Actions
 2. 选择要运行的 workflow：
-   - **flutter-ci.yml** - 完整构建（所有平台）
-   - **flutter-nightly.yml** - 每日构建
-   - **flutter-tag.yml** - 标签构建
+
+   | Workflow | 内容 | 用途 |
+   |---|---|---|
+   | **flutter-nightly.yml** | 全平台 + **可选 iOS** | 需要 iOS 产物时用这个 |
+   | **flutter-ci.yml** | 全平台（iOS 固定关） | 不验 iOS 时 |
+   | **windows-flutter-ci.yml** | 仅 Windows x64 | 快速验证 |
+
 3. 点击 "Run workflow"
+   - 需要 iOS ipa 时，勾选 **`build-ios`**（默认不勾）
+   - ⚠️ `workflow_dispatch` **不能只跑某个 job**，会跑该 workflow 的全部平台；
+     但所有 job 都是 `needs: [generate-bridge]`，bridge 完成后**并行执行**，
+     iOS job 与其他平台互不影响，直接盯 `build rustdesk ios ipa` 即可
 
 ### 下载构建产物
 
@@ -125,16 +158,61 @@ aws s3 cp s3://{R2_BUCKET}/1.4.9/20260425/windows/x86_64/rustdesk-1.4.9-x86_64.e
 
 ## 修改的文件
 
+相对上游 1.4.9 共改动 38 个文件（`git diff --name-only 1.4.9 HEAD`）。
+
+### CI / 构建
+
 | 文件 | 修改内容 |
 |-----|---------|
+| `.github/workflows/flutter-build.yml` | 主构建流程：产物上传/下载改为 R2；新增 iOS 双版本打包、Android 签名前置校验；修复多处 CI 失败 |
 | `.github/workflows/bridge.yml` | 上传 bridge 文件到 R2 |
 | `.github/workflows/third-party-RustDeskTempTopMostWindow.yml` | 上传 DLL 到 R2 |
-| `.github/workflows/flutter-build.yml` | 主要构建流程，所有产物上传/下载改为 R2 |
 | `.github/workflows/flutter-ci.yml` | 更新调用方式 |
-| `.github/workflows/flutter-nightly.yml` | 更新调用方式 |
+| `.github/workflows/flutter-nightly.yml` | 更新调用方式 + `build-ios` 开关 |
 | `.github/workflows/flutter-tag.yml` | 更新调用方式 |
-| `.github/scripts/r2-upload.sh` | R2 上传脚本（备用） |
-| `.github/scripts/r2-download.sh` | R2 下载脚本（备用） |
+| `.github/workflows/windows-flutter-ci.yml` | 新增：Windows x64 专用构建（快速验证） |
+| `.github/workflows/ci.yml`、`fdroid.yml` | 上游工作流适配 |
+| `.github/actions/upload-r2/action.yml` | 新增：R2 上传 composite action |
+| `.github/scripts/create-ios-ipa.sh` | 新增：产出未签名版 + 越狱版 ipa |
+| `.github/scripts/r2-upload.sh`、`r2-download.sh`、`upload-to-r2.sh` | R2 上传/下载脚本 |
+| `.gitignore`、`.gitmodules` | 忽略规则 + 子模块 fork 指向 |
+| `build_lib_release_local.ps1` | 本机编译脚本（LLVM15 libclang） |
+
+### 自定义功能（Rust）
+
+| 文件 | 修改内容 |
+|-----|---------|
+| `src/hw_encode_profile.rs` | 新增：硬件编码 profile 模块（预置档 / JSON 解析 / per-peer 覆盖 / `disable_vram` / `pin_fps` / `bitrate_adaptive`） |
+| `src/client.rs` | 远程控制会话不发送 token（`session_token` helper 覆盖 PunchHoleRequest / RequestRelay） |
+| `src/server/video_service.rs` | 注入编码参数；`check_qos` 按 `bitrate_adaptive` + `pin_fps` 门控；`disable_vram` 挂载 |
+| `src/server/connection.rs` | 连接建立时挂载 per-client profile |
+| `src/lib.rs` | 注册 `hw_encode_profile` 模块 |
+| `src/platform/windows.rs`、`windows.cc` | 选择可用用户桌面以启动 `--server`（避免 Session0 丢失） |
+| `libs/scrap/src/common/codec.rs`、`hwcodec.rs`、`vram.rs` | `HwEncoderParams` 结构 + 参数下发 |
+| `libs/scrap/src/dxgi/mod.rs` | 取帧后复制到私有纹理并立即释放帧，解除 IDD 反压（被控端 60 → ~95fps） |
+| `libs/scrap/Cargo.toml` | hwcodec 指向 fork rev |
+| `Cargo.toml`、`Cargo.lock` | 依赖与锁文件同步 |
+
+### UI（Flutter）
+
+| 文件 | 修改内容 |
+|-----|---------|
+| `flutter/lib/desktop/pages/desktop_setting_page.dart` | Hardware Encode Profile 设置 UI（显示设置页） |
+| `flutter/lib/consts.dart`、`lib/models/model.dart`、`input_model.dart` | 常量、模型字段、鼠标事件节流合并（修复拖动延迟） |
+
+### iOS 打包
+
+| 文件 | 修改内容 |
+|-----|---------|
+| `flutter/ios/Runner/Runner.private.entitlements` | 新增：越狱版注入的 entitlements（`application-identifier` 等） |
+| `.github/scripts/create-ios-ipa.sh` | 新增：`ldid -S` 伪签名 + 注入，产出两个 ipa |
+
+### 文档
+
+| 文件 | 修改内容 |
+|-----|---------|
+| `BUILD.md` | 本文档 |
+| `libs/hbb_common`（子模块） | 指向 `xxhhlk0/hbb_common` fork |
 
 ## 清理中间产物
 
@@ -239,12 +317,90 @@ preset 统一方向：**数值越大越慢、画质越好**（1 = nvenc p1 / qsv
   Windows Flutter 构建已启用（`python build.py --flutter --hwcodec --vram`，
   `--features inline,vram,hwcodec`）
 
-### 3. 依赖的 fork
+### 3. iOS 打包：未签名版 + 越狱版
+
+iOS job 由 `flutter-nightly.yml` 的 `build-ios` 开关控制（默认关，`workflow_dispatch` 勾选后开启）。
+
+**为什么需要两个版本**：`flutter build ipa --no-codesign` 产出的 app **没有任何签名块**，
+越狱设备安装时报
+
+```
+Application is missing the application-identifier entitlement
+```
+
+（Apple TN2319：installd 要求 Mach-O 里必须有 `application-identifier` entitlement）。
+纯未签名版装不上越狱设备，所以额外产出一个**已注入 entitlements 的越狱版**。
+
+| 产物 | 做法 | 适用场景 |
+|---|---|---|
+| `rustdesk-{VERSION}-ios-unsigned.ipa` | 只 `cp` + `zip`，**完全不签** | AltStore / Sideloadly（用自己 Apple ID 重签） |
+| `rustdesk-{VERSION}-ios-jailbroken.ipa` | `ldid -S<plist>` 伪签名 + 注入 entitlements | 越狱设备（AppSync Unified）直装；**TrollStore 亦可** |
+
+- 打包脚本：`.github/scripts/create-ios-ipa.sh`（可用 `VERSION` / `APP_DIR` / `ENT_FILE` / `OUT_DIR` / `SIGN_FRAMEWORKS` 环境变量覆盖）
+- entitlements：`flutter/ios/Runner/Runner.private.entitlements`（只含 `application-identifier`
+  = `com.carriez.flutterHbb` + `platform-application` / `get-task-allow` /
+  `increased-memory-limit` / mach-lookup 白名单）
+- **不产出独立 `.tipa`**：TrollStore 官方文档明确其安装时会用 fake root cert 重签、
+  **保留 ldid 注入的 entitlements**，故越狱版 ipa 拖进 TrollStore 即可用
+- 仅对 `codesign --verify` 失败的 Mach-O 补 ad-hoc 签名，已有有效签名的原样保留
+- `ldid` 由 CI 的 `brew install ldid` 提供
+
+**刻意不含的 entitlements**：
+
+- `aps-environment` / `com.apple.developer.networking.wifi-info`
+  —— 代码中零引用（已 grep 确认），且是免费 Apple ID 重签的受限项
+- `com.apple.private.cs.debugger` / `dynamic-codesigning` / `com.apple.private.skip-library-validation`
+  —— TrollStore 文档明示 **iOS 15 A12+ 已封禁，带上的 app 启动即崩溃**
+
+**其他 iOS 相关坑**：
+
+- Flutter 3.24.5 在 `--no-codesign` 下**只产 `Runner.xcarchive`，不创建 `build/ios/ipa/`**
+  （打印 `Codesigning disabled with --no-codesign, skipping IPA.`）
+  → 手工打包**必须先 `mkdir -p build/ios/ipa`**，否则 `zip` 报 `Could not create output file` 并以 **exit 15** 终止
+- 优先复用 xcarchive 里的 `Runner.app`，避免重复执行 `flutter build ios`（约省 2 分钟）
+
+### 4. Android 签名
+
+| Secret | 说明 |
+|---|---|
+| `ANDROID_SIGNING_KEY` | keystore 的 Base64（`base64 -w0 your.keystore`） |
+| `ANDROID_ALIAS` | keystore 内的 alias |
+| `ANDROID_KEY_STORE_PASSWORD` | store 密码 |
+| `ANDROID_KEY_PASSWORD` | key 密码（PKCS12 要求与 store 密码**相同**） |
+
+**两个必须知道的判据**：
+
+1. **`Sign app APK` 步骤被 `skipped` ≠ 成功**。secret 为空时该步骤静默跳过，
+   上传的是 **debug 签名 APK** —— 构建成功但**无法覆盖安装**。
+   **判"真签没签"看该步骤是 success 还是 skipped。**
+2. 报 `keystore password was incorrect`（`PKCS12KeyStore.engineLoad:2160`）
+   = **store 密码不匹配**（不是 alias 错，alias 错走另一条代码路径）。
+   已实测排除格式不兼容：cryptography/OpenSSL 产出的 PKCS12 可被 Java 17 正常加载；
+   但**非 ASCII（中文）密码必定失败** → 密码须纯 ASCII。
+
+CI 中每个 Android job 都有 `Verify signing configuration` 前置步骤，secrets 缺失或
+密码/别名不匹配时**提前给出可读错误**，不再等 apksigner 抛模糊异常。
+
+**本地自查**（脚本在**工作区**目录 `D:\T\OpenCode\github-repos\.rd-ci\`，不在本仓库内）：
+
+```bash
+cd D:/T/OpenCode/github-repos
+"/c/program files/python312/python.exe" .rd-ci/verify-android-keystore.py \
+    --keystore rustdesk.keystore --b64 rustdesk.keystore.b64
+```
+
+会报告密码是否可打开、keystore 内**真实 alias**、私钥位数、证书 SHA256
+（可与 `apksigner verify --print-certs` 比对），并警告密码含首尾空白或非 ASCII。
+
+> ⚠️ keystore 与密码**必须离线备份**（丢失则永远无法发布同签名更新）；
+> **绝不提交进仓库** —— 公开仓库等于公开签名私钥。
+
+### 5. 依赖的 fork
 
 | 依赖 | 上游 | 本仓库指向 | 原因 |
 |---|---|---|---|
 | `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
-| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `b6ed468` | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth`、`low_power`/`low_delay_brc`）+ VRAM 编码参数透传（preset 1-7 / rc / QP / 厂商私有项） |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `d34f21d`（分支 `custom-1.4.9`） | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth`、`low_power`/`low_delay_brc`）+ VRAM 编码参数透传（preset 1-7 / rc / QP / 厂商私有项） |
 
 hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`、
 `cpp/ffmpeg_vram/ffmpeg_vram_{ffi.h,encode.cpp}`、`cpp/mfx/mfx_{ffi.h,encode.cpp}`、
@@ -260,15 +416,12 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
 5. **新增 `set_encode_enhance()`**（`spatial-aq`/`temporal-aq`/`multipass`/`preanalysis`）：
    `EncodeContext` 与 `ffmpeg_ram_new_encoder()` FFI 相应扩参；该函数永不返回失败
    （可选项不该拖垮会话），并在 `avcodec_open2` 失败且应用过增强项时去增强重试一次
-6. **新增 `set_encode_enhance()`**（`spatial-aq`/`temporal-aq`/`multipass`/`preanalysis`）：
-   `EncodeContext` 与 `ffmpeg_ram_new_encoder()` FFI 相应扩参；该函数永不返回失败
-   （可选项不该拖垮会话），并在 `avcodec_open2` 失败且应用过增强项时去增强重试一次
-7. **把"实际生效的码控"打进日志**：QSV 没有 `rc` 选项，模式由 ffmpeg 的
+6. **把"实际生效的码控"打进日志**：QSV 没有 `rc` 选项，模式由 ffmpeg 的
    `qsvenc.c select_rc_mode` 从 AVCodecContext 字段推导，可能出现请求 CBR/CQ 而实际
    走 VBR/CQP 的静默失效，因此 `set_rate_control()` 会回读并打印实际模式、不一致时告警；
    `set_encode_enhance()` 在请求了编码器不支持的增强项时打印 `encode enhance ignored`；
    编码器日志补 `bit_rate`/`rc_max_rate`/`global_quality`，并在 `avcodec_open2` 后再打印一次
-8. **qsv 编码吞吐修复**：上游把最低延迟参数写死（`async_depth=1`，且不设 VDENC 相关项），
+7. **qsv 编码吞吐修复**：上游把最低延迟参数写死（`async_depth=1`，且不设 VDENC 相关项），
    iGPU 无法重叠"取帧-编码-回读"，编码吞吐被腰斩。Intel UHD 750 @2560x1440
    （testsrc2 60fps / preset=veryfast / ICQ20）实测：
    `async_depth=1` 78~89fps、`=2` 99~116fps、`=1 + low_power=1` 56fps（单独开反而更慢）、
@@ -283,7 +436,7 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
    - 三个参数都能用环境变量在运行期覆盖（改完重启 RustDesk 服务生效，无需重新构建）：
      `HWCODEC_ASYNC_DEPTH`（默认 2，设 1 退回上游行为）、`HWCODEC_QSV_LOW_POWER`（默认 1）、
      `HWCODEC_QSV_LOW_DELAY_BRC`（默认 1），设 `0` 即关闭
-9. **VRAM 编码参数透传**：新增 `opts` 通道（`key=value;key=value`），
+8. **VRAM 编码参数透传**：新增 `opts` 通道（`key=value;key=value`），
    `DynamicContext.opts` → 四个 `*_new_encoder()` FFI 新增 `const char *opts` 参数 →
    `util_encode::parse_opts()` / `has_opt()` / `opt_int()` / `opt_flag()` 拆表，
    各厂商只读自己认识的 key（未出现的 key 不下发，保持编码器默认值，即改动前的写死行为）
