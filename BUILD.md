@@ -9,11 +9,11 @@
 | 对象 | 当前值 |
 |---|---|
 | 上游基点 | rustdesk/rustdesk `1.4.9`（`6c578292`） |
-| 自定义提交数 | **48**（`git rev-list --count 1.4.9..HEAD`） |
-| 最新 tag | `1.4.9-custom.7` |
+| 自定义提交数 | **49**（`git rev-list --count 1.4.9..HEAD`） |
+| 最新 tag | `1.4.9-custom.8` |
 | 相关 fork | `xxhhlk0/hbb_common`、`xxhhlk0/hwcodec`（见「自定义功能 §5 依赖的 fork」） |
 
-> tag 命名规则：`1.4.9-custom.<N>`，每个 tag 对应一次实质功能提交。
+> tag 命名规则：`1.4.9-custom.<N>`，每个 tag 对应一次实质提交。
 > 所有 workflow 均为 `workflow_dispatch`（无 push/tag 自动触发），**打 tag 不会触发构建**，需手动 dispatch。
 
 ## 主要修改
@@ -344,6 +344,20 @@ Application is missing the application-identifier entitlement
   **保留 ldid 注入的 entitlements**，故越狱版 ipa 拖进 TrollStore 即可用
 - 仅对 `codesign --verify` 失败的 Mach-O 补 ad-hoc 签名，已有有效签名的原样保留
 - `ldid` 由 CI 的 `brew install ldid` 提供
+
+**CI 实测记录**（run `36028315019`，commit `b947507c1`，iOS job `success`）：
+
+```
+APP_DIR = flutter/build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app
+--> rustdesk-1.4.9-ios-unsigned.ipa    ( 24M)
+    另有 18 个未签名的 Mach-O 已补 ad-hoc 签名
+--> rustdesk-1.4.9-ios-jailbroken.ipa  ( 23M)
+upload: .../rustdesk-1.4.9-ios-jailbroken.ipa to s3://***/1.4.9/20260924/ios/arm64/
+upload: .../rustdesk-1.4.9-ios-unsigned.ipa   to s3://***/1.4.9/20260924/ios/arm64/
+```
+
+`codesign -dv --entitlements -` 能读出完整 entitlements（`application-identifier` =
+`com.carriez.flutterHbb` 等 5 项），确认 `ldid -S` 注入生效；两个 ipa 均上传成功。
 
 **刻意不含的 entitlements**：
 
