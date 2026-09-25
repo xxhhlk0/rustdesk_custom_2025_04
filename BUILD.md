@@ -9,7 +9,7 @@
 | 对象 | 当前值 |
 |---|---|
 | 上游基点 | rustdesk/rustdesk `1.4.9`（`6c578292`） |
-| 自定义提交数 | **49**（`git rev-list --count 1.4.9..HEAD`） |
+| 自定义提交数 | **49**（截至 tag `1.4.9-custom.8`） |
 | 最新 tag | `1.4.9-custom.8` |
 | 相关 fork | `xxhhlk0/hbb_common`、`xxhhlk0/hwcodec`（见「自定义功能 §5 依赖的 fork」） |
 
