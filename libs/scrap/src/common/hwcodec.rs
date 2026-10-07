@@ -78,6 +78,8 @@ pub struct HwRamEncoder {
     pub pixfmt: AVPixelFormat,
     bitrate: u32, //kbs
     config: HwRamEncoderConfig,
+    // 连续"已提交帧但无包产出"的计数, 见 encode_to_message 的 ENCODE_PENDING 分支。
+    pending_frames: u32,
 }
 
 impl EncoderApi for HwRamEncoder {
@@ -140,6 +142,7 @@ impl EncoderApi for HwRamEncoder {
                         pixfmt: ctx.pixfmt,
                         bitrate,
                         config,
+                        pending_frames: 0,
                     }),
                     Err(_) => Err(anyhow!(format!("Failed to create encoder"))),
                 }
@@ -149,6 +152,9 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn encode_to_message(&mut self, input: EncodeInput, ms: i64) -> ResultType<VideoFrame> {
+        // 连续无产出帧数上限: 超过它说明编码器真的不干活 (硬件被独占 / 驱动异常),
+        // 而不是异步流水线还没吐出第一个包。30 帧约等于 1 秒 (30fps)。
+        const MAX_PENDING_FRAMES: u32 = 30;
         let mut vf = VideoFrame::new();
         let mut frames = Vec::new();
         for frame in self
@@ -163,6 +169,7 @@ impl EncoderApi for HwRamEncoder {
             });
         }
         if frames.len() > 0 {
+            self.pending_frames = 0;
             let frames = EncodedVideoFrames {
                 frames: frames.into(),
                 ..Default::default()
@@ -174,7 +181,23 @@ impl EncoderApi for HwRamEncoder {
             }
             Ok(vf)
         } else {
-            Err(anyhow!("no valid frame"))
+            // 硬件编码器的异步流水线 (async_depth >= 1) 在启动、关键帧切换后的前几帧
+            // 本就不产出包, 这是正常行为而非编码失败。原来这里报 "no valid frame",
+            // 调用方 (video_service.rs handle_one_frame) 会把它计入失败, 且首帧失败
+            // 对非 latency_free 编码器直接 disable() → 清空 ram_encode → 整机降级为
+            // 软件编码 (AV1)。改为返回 ENCODE_PENDING, 调用方直接跳过 (与 vram 路径
+            // vram.rs 的 ENCODE_PENDING 对齐)。
+            self.pending_frames += 1;
+            if self.pending_frames > MAX_PENDING_FRAMES {
+                log::error!(
+                    "{} produced no frame for {} consecutive frames, switch encoder",
+                    self.config.name,
+                    self.pending_frames
+                );
+                self.pending_frames = 0;
+                bail!(crate::codec::ENCODE_NEED_SWITCH);
+            }
+            bail!(crate::codec::ENCODE_PENDING)
         }
     }
 
@@ -763,7 +786,6 @@ pub fn start_check_process() {
     if !enable_hwcodec_option() || HwCodecConfig::already_set() {
         return;
     }
-    use hbb_common::allow_err;
     use std::sync::Once;
     let f = || {
         if let Ok(exe) = std::env::current_exe() {
@@ -774,14 +796,25 @@ pub fn start_check_process() {
                 if let Ok(mut child) = cmd.spawn() {
                     #[cfg(windows)]
                     hwcodec::common::child_exit_when_parent_exit(child.id());
-                    // wait up to 30 seconds, it maybe slow on windows startup for poorly performing machines
-                    for _ in 0..30 {
+                    // 等待探测结束。冷启动的机器上可能要 1-2 分钟: 装了多个显示适配器
+                    // (尤其是虚拟显示驱动) 时, 每个适配器都要实建一次编码器, vram/ram 的
+                    // 编解码再全测一遍。原来只等 30 秒且超时即 kill 子进程 —— 子进程被杀
+                    // 之后探测结果永远送不到 server, server 只能沿用旧缓存, 而缓存里的
+                    // vram_encode.luid 会随重启失效 → vram 编码不可用 → 回退 RAM 路径 →
+                    // 再被首帧空产出打回软件编码。
+                    // 这里放宽到 180 秒, 且超时后不再强杀 (子进程已加入 job object, 父进程
+                    // 退出时会一并回收), 由下面的 wait() 兜底, 保证结果送达。
+                    for _ in 0..180 {
                         std::thread::sleep(std::time::Duration::from_secs(1));
                         if let Ok(Some(_)) = child.try_wait() {
                             break;
                         }
                     }
-                    allow_err!(child.kill());
+                    if child.try_wait().ok().flatten().is_none() {
+                        log::warn!(
+                            "Check hwcodec config still running after 180s, keep waiting for its result"
+                        );
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(30));
                     match child.try_wait() {
                         Ok(Some(status)) => {

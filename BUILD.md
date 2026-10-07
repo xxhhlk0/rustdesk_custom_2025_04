@@ -188,7 +188,7 @@ aws s3 cp s3://{R2_BUCKET}/1.4.9/20260425/windows/x86_64/rustdesk-1.4.9-x86_64.e
 | `src/server/connection.rs` | 连接建立时挂载 per-client profile |
 | `src/lib.rs` | 注册 `hw_encode_profile` 模块 |
 | `src/platform/windows.rs`、`windows.cc` | 选择可用用户桌面以启动 `--server`（避免 Session0 丢失） |
-| `libs/scrap/src/common/codec.rs`、`hwcodec.rs`、`vram.rs` | `HwEncoderParams` 结构 + 参数下发 |
+| `libs/scrap/src/common/codec.rs`、`hwcodec.rs`、`vram.rs` | `HwEncoderParams` 结构 + 参数下发；硬件编码探测超时 30→180s、RAM 路径首帧空产出改报 `ENCODE_PENDING`（见 §6） |
 | `libs/scrap/src/dxgi/mod.rs` | 取帧后复制到私有纹理并立即释放帧，解除 IDD 反压（被控端 60 → ~95fps） |
 | `libs/scrap/Cargo.toml` | hwcodec 指向 fork rev |
 | `Cargo.toml`、`Cargo.lock` | 依赖与锁文件同步 |
@@ -467,5 +467,40 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
    - ffmpeg_vram：`preset` 按编码器名映射（nvenc p1-p7 / qsv veryfast-veryslow / amf speed-quality），
      qsv 额外支持 `low_power`/`low_delay_brc`/`async_depth`/`cavlc`
    - 三家原生路径各新增一行 `mfx/nvenc/amf encode params:` 日志
+
+### 6. 硬件编码健壮性修复（探测超时 + 首帧空产出）
+
+针对"开机后被控端降级为软件编码（AV1）"的两个独立缺陷，均落在
+`libs/scrap/src/common/hwcodec.rs`。
+
+#### ① 硬件编码探测被 30 秒超时强杀 → vram 缓存 luid 过期
+
+- `start_check_process()` 原来只等探测子进程 30 秒就 `child.kill()`。装了多个显示适配器的
+  机器（尤其带虚拟显示驱动：向日葵 / GameViewer / Virtual Display Driver 等），冷启动时
+  每个适配器都要实建一次编码器、vram/ram 的编解码再全测一遍，**耗时 60–120 秒** → 必然超时被杀。
+- 子进程被杀后，探测结果永远送不到 server（`src/ipc.rs` 的 `hwcodec_process()` 走不到 `send`），
+  server 只能沿用旧缓存；而缓存里的 `vram_encode[].luid` 会随重启失效（虚拟显示驱动的
+  adapter luid 每次开机重新分配，`signature` 只哈希 GPU 型号/驱动、**不含 luid**，所以缓存
+  不会自动失效）→ `VRamEncoder::try_get()` 按当前显示器 luid 过滤后为空 → 编码器回退 RAM 路径。
+- 修复：等待放宽到 **180 秒**，且超时后**不再强杀**（子进程已加入 job object，父进程退出时
+  会一并回收），由随后的 `child.wait()` 兜底，保证探测结果送达 server。
+
+#### ② RAM 路径首帧空产出被误判为编码失败 → 整机降级软件编码
+
+- `HwRamEncoder::encode_to_message()` 原来在"本次调用没有产出包"时报 `no valid frame`。
+  但硬件编码器的异步流水线（`async_depth >= 1`）在启动、关键帧切换后的前几帧**本就不产出包**，
+  属正常行为（vram 路径的 `do_encode()` 早已容忍首帧 `EAGAIN`，见 §5 第 7 条）。
+- 调用方（`src/server/video_service.rs` 的 `handle_one_frame`）把它计入失败，且对非
+  `latency_free` 编码器**首帧失败即 `disable()`** → `HwCodecConfig::clear(false, true)` 清空
+  `ram_encode` → 之后所有连接 `usable: h264=false` → 永久降级 AV1 软件编码（进程内不恢复）。
+- 修复：改为返回 `ENCODE_PENDING`，调用方直接跳过、不计失败（与 vram 路径 `vram.rs` 对齐）。
+  **同时加安全网**：新增 `HwRamEncoder.pending_frames`，连续无产出超过 30 帧（约 1 秒 @30fps）
+  则报 `ENCODE_NEED_SWITCH`，交回调用方切换编码器 —— 避免编码器真的坏了（硬件被独占 /
+  驱动异常）时无限等待、画面冻结且永不切换。
+
+**影响范围**：② 覆盖所有走 RAM 路径的硬件编码器（`h264_qsv`/`hevc_qsv`、`h264_nvenc`/
+`hevc_nvenc`、`h264_amf`/`hevc_amf`、`h264_vaapi`），不是只有 QSV；vram 路径不受影响。
+
+**判据**：硬件编码时 `video enc stats` 的 `avg_convert ≈ 0.0ms`；软件（AV1/AOM）≈ 2ms+。
 
 
