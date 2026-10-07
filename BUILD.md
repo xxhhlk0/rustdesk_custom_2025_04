@@ -9,8 +9,8 @@
 | 对象 | 当前值 |
 |---|---|
 | 上游基点 | rustdesk/rustdesk `1.4.9`（`6c578292`） |
-| 自定义提交数 | **49**（截至 tag `1.4.9-custom.8`） |
-| 最新 tag | `1.4.9-custom.8` |
+| 自定义提交数 | **52**（截至 tag `1.4.9-custom.9`） |
+| 最新 tag | `1.4.9-custom.9` |
 | 相关 fork | `xxhhlk0/hbb_common`、`xxhhlk0/hwcodec`（见「自定义功能 §5 依赖的 fork」） |
 
 > tag 命名规则：`1.4.9-custom.<N>`，每个 tag 对应一次实质提交。
@@ -500,6 +500,20 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
 
 **影响范围**：② 覆盖所有走 RAM 路径的硬件编码器（`h264_qsv`/`hevc_qsv`、`h264_nvenc`/
 `hevc_nvenc`、`h264_amf`/`hevc_amf`、`h264_vaapi`），不是只有 QSV；vram 路径不受影响。
+
+按平台看（② 的判据是 `HwRamEncoder::latency_free()` —— 名字**不含** `mediacodec`/`videotoolbox`
+才为 `true`，而 `true` 会走"首帧失败即 `disable()`"分支）：
+
+| 平台 | ① 探测超时 | ② 首帧误判 | 需重新出包 |
+|---|---|---|---|
+| Windows | 命中 | 命中（qsv / nvenc / amf） | **必须** |
+| Linux | 命中 | 命中（`h264_vaapi`） | **必须** |
+| macOS | 命中 | 免疫（RAM 路径只有 `hevc_videotoolbox`，名字命中容忍名单 → `latency_free=false`） | 可选 |
+| Android / iOS | 不适用（`start_check_process` 被 `cfg` 排除） | 无此路径 | 不需要 |
+
+注：Android / iOS 的 CI 虽然也带 `--features hwcodec`，但 `hwcodec` 的 `available_encoders()`
+首行即 `if !(windows || linux || macos) { return vec![] }` → `ram_encode` 恒为空，
+`HwRamEncoder` 在这两个平台永远不会被创建（iOS 另有 `enable_hwcodec_option()` 硬编码 `false`）。
 
 **判据**：硬件编码时 `video enc stats` 的 `avg_convert ≈ 0.0ms`；软件（AV1/AOM）≈ 2ms+。
 
