@@ -43,6 +43,20 @@ lazy_static::lazy_static! {
     static ref CONFIG_SET_BY_IPC: std::sync::Arc<std::sync::Mutex<bool>> = Default::default();
 }
 
+#[cfg(target_os = "android")]
+static MEDIACODEC_DECODE_FAILED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(target_os = "android")]
+fn mediacodec_decode_bit(name: &str) -> u8 {
+    if name.contains("h264") {
+        1
+    } else if name.contains("hevc") {
+        2
+    } else {
+        0
+    }
+}
+
 /// 编码预设与码率控制枚举映射 (数值语义见 codec.rs HwEncoderParams)
 pub(crate) fn map_quality(v: i32) -> Quality {
     match v {
@@ -375,22 +389,17 @@ pub struct HwRamDecoder {
 }
 
 impl HwRamDecoder {
-    pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
-        let mut info = None;
+    fn soft_info(format: CodecFormat) -> Option<CodecInfo> {
         let soft = CodecInfo::soft();
         match format {
-            CodecFormat::H264 => {
-                if let Some(v) = soft.h264 {
-                    info = Some(v);
-                }
-            }
-            CodecFormat::H265 => {
-                if let Some(v) = soft.h265 {
-                    info = Some(v);
-                }
-            }
-            _ => {}
+            CodecFormat::H264 => soft.h264,
+            CodecFormat::H265 => soft.h265,
+            _ => None,
         }
+    }
+
+    pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
+        let mut info = Self::soft_info(format);
         if enable_hwcodec_option() {
             let best = CodecInfo::prioritized(HwCodecConfig::get().ram_decode);
             match format {
@@ -416,18 +425,36 @@ impl HwRamDecoder {
         let Some(info) = info else {
             bail!("unsupported format: {:?}", format);
         };
-        let ctx = DecodeContext {
-            name: info.name.clone(),
-            device_type: info.hwdevice.clone(),
-            thread_count: codec_thread_num(16) as _,
-        };
-        match Decoder::new(ctx) {
+        match Self::create(&info) {
             Ok(decoder) => Ok(HwRamDecoder { decoder, info }),
             Err(_) => {
+                log::error!("create {} ram decoder failed", info.name);
+                #[cfg(target_os = "android")]
+                {
+                    if info.name.contains("mediacodec") {
+                        MEDIACODEC_DECODE_FAILED.fetch_or(
+                            mediacodec_decode_bit(&info.name),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        if let Some(soft) = Self::soft_info(format) {
+                            if let Ok(decoder) = Self::create(&soft) {
+                                return Ok(HwRamDecoder { decoder, info: soft });
+                            }
+                        }
+                    }
+                }
                 HwCodecConfig::clear(false, false);
                 Err(anyhow!(format!("Failed to create decoder")))
             }
         }
+    }
+
+    fn create(info: &CodecInfo) -> Result<Decoder, ()> {
+        Decoder::new(DecodeContext {
+            name: info.name.clone(),
+            device_type: info.hwdevice.clone(),
+            thread_count: codec_thread_num(16) as _,
+        })
     }
     pub fn decode<'a>(&'a mut self, data: &[u8]) -> ResultType<Vec<HwRamDecoderImage<'a>>> {
         match self.decoder.decode(data) {
@@ -659,8 +686,23 @@ impl HwCodecConfig {
                 });
             }
             log::debug!("e: {e:?}");
+            let failed = MEDIACODEC_DECODE_FAILED.load(std::sync::atomic::Ordering::SeqCst);
+            let mut d: Vec<CodecInfo> = vec![];
+            ts.iter().for_each(|t| {
+                if (failed & mediacodec_decode_bit(t.name_prefix)) == 0 {
+                    d.push(CodecInfo {
+                        name: format!("{}_mediacodec", t.name_prefix),
+                        mc_name: None,
+                        format: t.data_format,
+                        hwdevice: hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE,
+                        priority: hwcodec::ffmpeg_ram::Priority::Best as _,
+                    });
+                }
+            });
+            log::debug!("d: {d:?}");
             HwCodecConfig {
                 ram_encode: e,
+                ram_decode: d,
                 ..Default::default()
             }
         }
