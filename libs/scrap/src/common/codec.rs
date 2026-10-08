@@ -68,7 +68,7 @@ pub enum EncoderCfg {
 /// - rc:     0=DEFAULT 1=CBR 2=VBR 3=CQ / 恒定 QP (配合 q;
 ///           nvenc rc=constqp+qp, amf rc=cqp+qp_i|p|b, qsv ICQ, mediacodec bitrate_mode=cq)
 /// - kbs:    None = 按 base_bitrate×ratio 自动推导; rc=CQ 时被忽略
-/// - fps/gop/q: None = 沿用内置默认 (30 / keyframe_interval / -1)
+/// - fps/gop/q: None = 沿用内置默认 (30 / fps×20 / -1; 录制时优先使用 keyframe_interval)
 /// - 画质增强 (编码器内建能力, 不额外占用 CPU; None = 不设置, 保持编码器默认):
 ///   spatial_aq/temporal_aq/multipass 仅 nvenc, preanalysis 仅 amf;
 ///   multipass: 1 = two pass quarter res, 2 = two pass full res。
@@ -580,14 +580,6 @@ impl Decoder {
                     }
                     valid = h264_vram.is_some();
                 }
-                #[cfg(feature = "hwcodec")]
-                if !valid {
-                    match HwRamDecoder::new(format) {
-                        Ok(v) => h264_ram = Some(v),
-                        Err(e) => log::error!("create H264 ram decoder failed: {}", e),
-                    }
-                    valid = h264_ram.is_some();
-                }
                 #[cfg(feature = "mediacodec")]
                 if !valid && enable_hwcodec_option() {
                     h264_media_codec = MediaCodecDecoder::new(format);
@@ -595,6 +587,14 @@ impl Decoder {
                         log::error!("create H264 media codec decoder failed");
                     }
                     valid = h264_media_codec.is_some();
+                }
+                #[cfg(feature = "hwcodec")]
+                if !valid {
+                    match HwRamDecoder::new(format) {
+                        Ok(v) => h264_ram = Some(v),
+                        Err(e) => log::error!("create H264 ram decoder failed: {}", e),
+                    }
+                    valid = h264_ram.is_some();
                 }
             }
             CodecFormat::H265 => {
@@ -606,14 +606,6 @@ impl Decoder {
                     }
                     valid = h265_vram.is_some();
                 }
-                #[cfg(feature = "hwcodec")]
-                if !valid {
-                    match HwRamDecoder::new(format) {
-                        Ok(v) => h265_ram = Some(v),
-                        Err(e) => log::error!("create H265 ram decoder failed: {}", e),
-                    }
-                    valid = h265_ram.is_some();
-                }
                 #[cfg(feature = "mediacodec")]
                 if !valid && enable_hwcodec_option() {
                     h265_media_codec = MediaCodecDecoder::new(format);
@@ -621,6 +613,14 @@ impl Decoder {
                         log::error!("create H265 media codec decoder failed");
                     }
                     valid = h265_media_codec.is_some();
+                }
+                #[cfg(feature = "hwcodec")]
+                if !valid {
+                    match HwRamDecoder::new(format) {
+                        Ok(v) => h265_ram = Some(v),
+                        Err(e) => log::error!("create H265 ram decoder failed: {}", e),
+                    }
+                    valid = h265_ram.is_some();
                 }
             }
             CodecFormat::Unknown => {

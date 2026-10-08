@@ -203,7 +203,10 @@ impl VideoQoS {
         }
         if let Some(user) = self.users.get_mut(&id) {
             user.custom_fps = Some(fps);
+            // Apply an explicit controller FPS change immediately; later delay samples can lower it.
+            user.delay.fps = Some(fps);
         }
+        self.adjust_fps();
     }
 
     pub fn user_auto_adjust_fps(&mut self, id: i32, fps: u32) {

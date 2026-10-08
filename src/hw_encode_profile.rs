@@ -4,8 +4,8 @@
 // - 按客户端覆盖: Config::get_peer_option(peer_id, "hw-encode-profile")
 //   (sunshine 基地版"客户端独立配置"模式; 编码器为被控端共享, 以最近连接的
 //    带 override 客户端为准, 其断开后回落到全局默认)
-// - 生效时机: 编码器随会话建立/编码协商创建 (video_service setup_encoder),
-//   修改配置后对新会话生效。
+// - 生效时机: 编码器随会话建立/编码协商创建 (video_service setup_encoder);
+//   活跃会话检测到配置变化后会自动重建编码器。
 use hbb_common::{
     config::Config, log, serde_derive::{Deserialize, Serialize},
 };
@@ -77,7 +77,7 @@ pub struct HwEncodeProfile {
     /// 打开此项后帧率固定为 fps (网络拥塞时表现为卡顿/延迟增大, 不再自动降帧)。
     #[serde(default)]
     pub pin_fps: bool,
-    /// GOP 覆盖; None = keyframe_interval / MAX_GOP (录制时 240 优先)
+    /// GOP 覆盖; None = 帧率的 20 倍 (录制时 keyframe_interval 优先)
     #[serde(default)]
     pub gop: Option<i32>,
     /// 画质增强 (编码器内建能力, 不额外占用 CPU; None = 保持编码器默认)
@@ -300,7 +300,7 @@ pub fn preset(id: &str) -> Option<HwEncodeProfile> {
             id: PRESET_QUALITY.to_owned(),
             preset: Some(PRESET_MEDIUM), // nvenc p4 / qsv medium / amf balanced
             rc: Some(RC_VBR),
-            gop: Some(240),
+            gop: None,
             // 零成本画质增强 (编码器内建): nvenc spatial AQ + 两次编码(1/4 分辨率),
             // amf pre-analysis。temporal AQ 有 GPU 能力门槛, 仅自定义档可选。
             spatial_aq: Some(1),
@@ -352,7 +352,7 @@ fn peer_profile(peer_id: &str) -> Option<HwEncodeProfile> {
 struct ActiveOverride {
     conn_id: i32,
     peer_id: String,
-    profile: HwEncodeProfile,
+    profile: Option<HwEncodeProfile>,
 }
 
 lazy_static::lazy_static! {
@@ -370,7 +370,7 @@ pub fn on_connection_open(conn_id: i32, peer_id: &str) {
         *ACTIVE.lock().unwrap() = Some(ActiveOverride {
             conn_id,
             peer_id: peer_id.to_owned(),
-            profile: p,
+            profile: Some(p),
         });
     }
 }
@@ -387,13 +387,18 @@ pub fn on_connection_close(conn_id: i32) {
         if let Some(pid) = peer.as_ref() {
             log::info!("hw-encode-profile: 客户端 {pid} 断开, 覆盖 profile 失效");
         }
-        let candidates: Vec<String> = CONNS.lock().unwrap().values().cloned().collect();
-        for pid in candidates {
+        let candidates: Vec<(i32, String)> = CONNS
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(conn_id, peer_id)| (*conn_id, peer_id.clone()))
+            .collect();
+        for (candidate_conn_id, pid) in candidates {
             if let Some(p) = peer_profile(&pid) {
                 *ACTIVE.lock().unwrap() = Some(ActiveOverride {
-                    conn_id,
+                    conn_id: candidate_conn_id,
                     peer_id: pid.clone(),
-                    profile: p,
+                    profile: Some(p),
                 });
                 break;
             }
@@ -403,8 +408,24 @@ pub fn on_connection_close(conn_id: i32) {
 
 /// 当前生效的 profile: 客户端覆盖 > 全局默认
 pub fn active_profile() -> Option<HwEncodeProfile> {
-    if let Some(a) = ACTIVE.lock().unwrap().as_ref() {
-        return Some(a.profile.clone());
+    if let Some(profile) = ACTIVE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|a| a.profile.clone())
+    {
+        return Some(profile);
+    }
+    global_profile()
+}
+
+/// Reload the active per-client override from disk so edits can apply while connected.
+pub fn refresh_active_profile() -> Option<HwEncodeProfile> {
+    let mut active = ACTIVE.lock().unwrap();
+    if let Some(active) = active.as_mut() {
+        let profile = peer_profile(&active.peer_id);
+        active.profile = profile.clone();
+        return profile.or_else(global_profile);
     }
     global_profile()
 }

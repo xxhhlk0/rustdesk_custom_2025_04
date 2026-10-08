@@ -943,9 +943,10 @@ pub fn check_software_update() {
         return;
     }
     let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
-    if config::option2bool(keys::OPTION_ENABLE_CHECK_UPDATE, &opt) {
-        std::thread::spawn(move || allow_err!(do_check_software_update()));
+    if opt.is_empty() || !config::option2bool(keys::OPTION_ENABLE_CHECK_UPDATE, &opt) {
+        return;
     }
+    std::thread::spawn(move || allow_err!(do_check_software_update()));
 }
 
 // No need to check `danger_accept_invalid_cert` for now.

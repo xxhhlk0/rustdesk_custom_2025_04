@@ -30,7 +30,8 @@ use hwcodec::{
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
 pub const DEFAULT_FPS: i32 = 30;
-const DEFAULT_GOP: i32 = i32::MAX;
+const GOP_FPS_MULTIPLIER: i32 = 20;
+const DEFAULT_GOP: i32 = DEFAULT_FPS * GOP_FPS_MULTIPLIER;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
 pub const ERR_HEVC_POC: i32 = HwcodecErrno::HWCODEC_ERR_HEVC_COULD_NOT_FIND_POC as i32;
 
@@ -103,10 +104,11 @@ impl EncoderApi for HwRamEncoder {
                     None => Self::bitrate(&config.name, config.width, config.height, config.quality),
                 };
                 bitrate = Self::check_bitrate_range(&config, bitrate);
+                let fps = params.fps.unwrap_or(DEFAULT_FPS);
                 let gop = params
                     .gop
-                    .unwrap_or(config.keyframe_interval.unwrap_or(DEFAULT_GOP as _) as _);
-                let fps = params.fps.unwrap_or(DEFAULT_FPS);
+                    .or_else(|| config.keyframe_interval.map(|interval| interval as i32))
+                    .unwrap_or_else(|| fps.saturating_mul(GOP_FPS_MULTIPLIER));
                 let ctx = EncodeContext {
                     name: config.name.clone(),
                     mc_name: config.mc_name.clone(),

@@ -599,6 +599,7 @@ fn run(vs: VideoService) -> ResultType<()> {
 
     let display_idx = vs.idx;
     let sp = vs.sp;
+    let active_hw_profile = crate::hw_encode_profile::refresh_active_profile();
     let mut c = get_capturer(vs.source, display_idx, last_portable_service_running)?;
     #[cfg(windows)]
     if !scrap::codec::enable_directx_capture() && !c.is_gdi() {
@@ -701,8 +702,17 @@ fn run(vs: VideoService) -> ResultType<()> {
     // 固定节拍用的绝对 deadline (见循环末尾): Windows 的 sleep 精度很差,
     // 16.7ms 目标下每轮多睡 1~2ms 就会把 60fps 拖成 ~54fps。
     let mut frame_deadline = Instant::now();
+    let mut profile_check_instant = Instant::now();
 
     while sp.ok() {
+        if profile_check_instant.elapsed() >= Duration::from_millis(500) {
+            profile_check_instant = Instant::now();
+            let current_profile = crate::hw_encode_profile::refresh_active_profile();
+            if current_profile != active_hw_profile {
+                log::info!("hardware encode profile changed, recreating encoder");
+                bail!("SWITCH");
+            }
+        }
         #[cfg(windows)]
         check_uac_switch(c.privacy_mode_id, c._capturer_privacy_mode_id)?;
         check_qos(
@@ -1098,8 +1108,16 @@ fn get_encoder_config(
     }
     #[cfg(feature = "vram")]
     Encoder::update(scrap::codec::EncodingUpdate::Check);
-    // https://www.wowza.com/community/t/the-correct-keyframe-interval-in-obs-studio/95162
-    let keyframe_interval = if record { Some(240) } else { None };
+    // 默认关键帧间隔为编码帧率的 20 倍; 录制仍固定为 240 帧。
+    let profile_fps = crate::hw_encode_profile::active_profile()
+        .and_then(|profile| profile.fps)
+        .unwrap_or(30)
+        .max(1) as usize;
+    let keyframe_interval = if record {
+        Some(240)
+    } else {
+        Some(profile_fps.saturating_mul(20))
+    };
     let negotiated_codec = Encoder::negotiated_codec();
     // 硬件编码 profile (预置档/自定义 + 按客户端覆盖)
     #[cfg(feature = "hwcodec")]

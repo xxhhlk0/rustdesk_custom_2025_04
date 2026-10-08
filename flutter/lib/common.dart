@@ -1624,7 +1624,9 @@ String translate(String name) {
 // sciter: Does not have the function, but it should be kept the same.
 bool option2bool(String option, String value) {
   bool res;
-  if (option.startsWith("enable-")) {
+  if (option == kOptionEnableCheckUpdate && value.isEmpty) {
+    res = false;
+  } else if (option.startsWith("enable-")) {
     res = value != "N";
   } else if (option.startsWith("allow-") ||
       option == kOptionStopService ||

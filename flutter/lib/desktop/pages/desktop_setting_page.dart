@@ -2294,7 +2294,7 @@ class _DisplayState extends State<_Display> {
     final peers = _hwOverridePeers();
     return _Card(title: 'Hardware Encode Profile', children: [
       Text(
-        translate('Applied by the controlled side at the next session. Per-client override takes effect when that client connects.'),
+        translate('Changes to the global profile or current client override apply after a brief encoder restart.'),
         style: const TextStyle(fontSize: 12, color: Colors.grey),
       ).marginOnly(bottom: 8),
       _Radio(context,
@@ -2310,7 +2310,7 @@ class _DisplayState extends State<_Display> {
       _Radio(context,
           value: 'quality',
           groupValue: sel,
-          label: 'Quality first (preset Medium, VBR, GOP 240)',
+          label: 'Quality first (preset Medium, VBR, GOP 20× FPS)',
           onChanged: (v) => _saveHwProfile(v)),
       _Radio(context,
           value: 'custom',
@@ -2344,7 +2344,7 @@ class _DisplayState extends State<_Display> {
           _hwField('QP (0-51, CQ only)', _customQCtrl, number: true, hint: 'Auto if empty'),
           _hwField('FPS (encoder)', _customFpsCtrl,
               number: true, hint: '30 if empty'),
-          _hwField('GOP', _customGopCtrl, number: true, hint: 'Default if empty'),
+          _hwField('GOP', _customGopCtrl, number: true, hint: '20× FPS if empty'),
           _hwDropdown('Spatial AQ (nvenc)', _customSpatialAqCtrl.text, {
             '': 'Default',
             '1': 'On',

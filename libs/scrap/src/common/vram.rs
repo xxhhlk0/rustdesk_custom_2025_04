@@ -73,9 +73,11 @@ impl EncoderApi for VRamEncoder {
                         config.quality,
                     ),
                 };
+                let framerate = params.fps.unwrap_or(30);
                 let gop = params
                     .gop
-                    .unwrap_or(config.keyframe_interval.unwrap_or(MAX_GOP as _) as _);
+                    .or_else(|| config.keyframe_interval.map(|interval| interval as i32))
+                    .unwrap_or_else(|| framerate.saturating_mul(20));
                 // 透传编码 profile: preset / rc / QP / 画质增强 (C 侧 RC_DEFAULT 回退 CBR, q=-1 不设置)
                 #[cfg(feature = "hwcodec")]
                 let quality = super::hwcodec::map_quality(params.preset.unwrap_or(0)) as i32;
@@ -133,7 +135,7 @@ impl EncoderApi for VRamEncoder {
                         width: config.width as _,
                         height: config.height as _,
                         kbitrate: bitrate as _,
-                        framerate: params.fps.unwrap_or(30),
+                        framerate,
                         gop,
                         quality,
                         rc,
