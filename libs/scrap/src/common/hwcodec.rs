@@ -141,6 +141,10 @@ impl EncoderApi for HwRamEncoder {
                     multipass: params.multipass.unwrap_or(0),
                     preanalysis: params.preanalysis.unwrap_or(false),
                     thread_count: codec_thread_num(16) as _, // ffmpeg's thread_count is used for cpu
+                    // 厂商私有参数 (含 async_depth / low_power / low_delay_brc / cavlc):
+                    // 此前 RAM 通道完全没有透传入口, 导致手动调参被 C 侧内建默认静默盖掉。
+                    // 与 VRAM 通道共用 codec.rs::hw_vendor_opts 一份构造逻辑。
+                    opts: crate::codec::hw_vendor_opts(&params),
                 };
                 let format = match Encoder::format_from_name(config.name.clone()) {
                     Ok(format) => format,
@@ -869,6 +873,8 @@ pub fn check_available_hwcodec() -> String {
         multipass: 0,
         preanalysis: false,
         thread_count: 4,
+        // 能力探测阶段不带任何 profile 参数 (用编码器默认能力判定可用性)
+        opts: String::new(),
     };
     #[cfg(feature = "vram")]
     let vram = crate::vram::check_available_vram();

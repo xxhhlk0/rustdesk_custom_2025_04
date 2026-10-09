@@ -76,9 +76,12 @@ zbus = { version = "3.15", optional = true }
 #   摘出 SPS/PPS(H265 另加 VPS) 当 extradata 再 open (ffmpeg 的 mediacodec
 #   wrapper 在 open 阶段就要求 extradata 非空, 否则 EINVAL -> open 失败);
 #   其它解码器路径不变
+# + 编码参数优先级: 手动设置 (profile) 覆盖内建默认。ffmpeg_ram 通道补齐 opts
+#   透传 (此前 RAM 通道没有入口, async_depth/low_power 被内建默认静默盖掉),
+#   两个通道共用 apply_qsv_vendor_opts, 每个覆盖项打一行日志
 # branch: custom-1.4.9
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "d26e5fab4b57ef784e73ed5e2dc773ab3a659c4d"
+rev = "d634ac0e0b133640338113d413d94876b884f766"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]

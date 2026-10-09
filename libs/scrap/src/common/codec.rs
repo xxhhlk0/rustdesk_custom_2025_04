@@ -93,6 +93,47 @@ pub struct HwEncoderParams {
     pub vendor: Vec<(String, i32)>,
 }
 
+/// 把编码 profile 的"画质增强项 + 厂商私有参数"拼成 hwcodec C 侧认识的
+/// `key=value;key=value` 串。键名与 C 侧 opts 的 key 一致 (见 HwEncoderParams 文档),
+/// 各厂商只读取自己认识的 key, 因此三家的参数可以一起下发; 未配置的 key 不下发,
+/// 保持编码器默认。RAM 与 VRAM 两个通道共用这一份构造逻辑, 避免两边口径漂移。
+///
+/// 注意: 该串只是"请求值", 最终是否生效由 C 侧决定 —— C 侧在内建默认
+/// (async_depth=1 / low_power=1 等) 之后应用它, 即手动设置的值优先。
+pub fn hw_vendor_opts(params: &HwEncoderParams) -> String {
+    let mut vendor_opts = Vec::<(String, String)>::new();
+    let mut push = |k: &str, v: i32| vendor_opts.push((k.to_owned(), v.to_string()));
+    if let Some(v) = params.preset {
+        push("preset", v);
+    }
+    if let Some(v) = params.rc {
+        push("rc", v);
+    }
+    if let Some(v) = params.q {
+        push("q", v);
+    }
+    if let Some(v) = params.spatial_aq {
+        push("spatial_aq", v as i32);
+    }
+    if let Some(v) = params.temporal_aq {
+        push("temporal_aq", v as i32);
+    }
+    if let Some(v) = params.multipass {
+        push("multipass", v);
+    }
+    if let Some(v) = params.preanalysis {
+        push("preanalysis", v as i32);
+    }
+    for (k, v) in params.vendor.iter() {
+        push(k, *v);
+    }
+    vendor_opts
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 pub trait EncoderApi {
     fn new(cfg: EncoderCfg, i444: bool) -> ResultType<Self>
     where

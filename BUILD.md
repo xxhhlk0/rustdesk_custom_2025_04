@@ -304,16 +304,22 @@ preset 统一方向：**数值越大越慢、画质越好**（1 = nvenc p1 / qsv
     **会去掉全部增强项自动重试一次**并记日志，不会让远程会话建不起来
   - `quality` 预置档默认开启 spatial AQ + multipass(quarter res) + pre-analysis；
     `temporal-aq` 默认关（能力门槛），仅在「自定义」档可选
-- **厂商私有参数**（`vendor` 字段，仅 VRAM 通道生效，设置页按厂商标注）：
+- **厂商私有参数**（`vendor` 字段，VRAM 与 RAM 两个硬编通道都生效，设置页按厂商标注）：
   - nvenc：`tuning`（1=ultra low latency / 2=low latency / 3=high quality）、
     `lookahead_depth`（0=关，开启会增加延迟）、`target_quality`（VBR 目标质量）、`num_ref_frame`
   - qsv：`cavlc`、`low_power`、`low_delay_brc`、`async_depth`、`num_ref_frame`
   - amf：`usage`（1=ultra low latency / 2=low latency / 4=high quality）、`vbaq`、`enforce_hrd`、
     `slices_per_frame`、`high_motion_qb`、`lowlatency_mode`、`input_queue_size`、`num_ref_frame`
   - 三家的参数可以同时配置：hwcodec 把整串下发，各厂商只读取自己认识的 key，其余忽略
-  - 留空 = 不下发 = 保持编码器默认（qsv 的 `async_depth`/`low_power`/`low_delay_brc`
-    未配置时仍取 §3 第 8 条的吞吐修复默认值）
-- VRAM 通道（GPU 纹理直达）同样接收 preset/rc/QP/画质增强/厂商私有参数，无需回落 RAM 通道。
+  - **优先级：手动设置 > 内建默认**。hwcodec 先下发内建默认（qsv 的
+    `async_depth` 取 `hw_async_depth()`、`low_power`/`low_delay_brc` 由 `apply_qsv_low_latency()`
+    打开），再应用 profile 里的同名 key 覆盖它；留空 = 不下发 = 保持内建默认。
+    每个被覆盖的 key 会在被控端日志打一行 `qsv vendor opt override: <key>=<v>`
+    （`qsv async_depth = N` 那行是**覆盖前**的值，不能用来判断最终取值）。
+  - ⚠️ 只有 qsv 的 key 走 ffmpeg 通道（`ffmpeg_vram` / `ffmpeg_ram`）；nvenc / amf 的 key
+    由 `cpp/nv`、`cpp/amf` 原生通道读取，在 ffmpeg 编码器上不会生效
+- RAM 与 VRAM 两个硬编通道都接收 preset/rc/QP/画质增强/厂商私有参数
+  （`codec.rs::hw_vendor_opts` 统一构造下发串，避免两边口径漂移）。
   Windows Flutter 构建已启用（`python build.py --flutter --hwcodec --vram`，
   `--features inline,vram,hwcodec`）
 
@@ -414,7 +420,7 @@ cd D:/T/OpenCode/github-repos
 | 依赖 | 上游 | 本仓库指向 | 原因 |
 |---|---|---|---|
 | `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
-| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `d34f21d`（分支 `custom-1.4.9`） | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth`、`low_power`/`low_delay_brc`）+ VRAM 编码参数透传（preset 1-7 / rc / QP / 厂商私有项） |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `d634ac0`（分支 `custom-1.4.9`） | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth`、`low_power`/`low_delay_brc`）+ 编码参数透传（preset 1-7 / rc / QP / 厂商私有项，VRAM 与 RAM 两通道）+ **手动设置的值优先于内建默认** |
 
 hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`、
 `cpp/ffmpeg_vram/ffmpeg_vram_{ffi.h,encode.cpp}`、`cpp/mfx/mfx_{ffi.h,encode.cpp}`、
@@ -448,8 +454,12 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
    - `do_encode()` 容忍首帧 `EAGAIN`（等包而不是立刻返回失败，否则首帧会被上层当成编码错误并切掉
      硬件编码器），交付完当前帧的包后即正常收工、不空等到超时
    - 三个参数都能用环境变量在运行期覆盖（改完重启 RustDesk 服务生效，无需重新构建）：
-     `HWCODEC_ASYNC_DEPTH`（默认 2，设 1 退回上游行为）、`HWCODEC_QSV_LOW_POWER`（默认 1）、
-     `HWCODEC_QSV_LOW_DELAY_BRC`（默认 1），设 `0` 即关闭
+     `HWCODEC_ASYNC_DEPTH`（**默认 1**，设 2 才拿得到上表 154fps 那一档；之所以不用 2 是因为
+     `async_depth=2` 时首帧不出包，会被运行时误判成"硬件编码器不干活"而降级到 AV1 软编）、
+     `HWCODEC_QSV_LOW_POWER`（默认 1）、`HWCODEC_QSV_LOW_DELAY_BRC`（默认 1），设 `0` 即关闭
+   - ⚠️ 按上表，**默认组合 `async_depth=1 + low_power=1` 恰好是实测最差的一档（56fps）**。
+     想验证 154fps 那档不必改环境变量：直接在编码 profile 里下发 `async_depth=2`
+     （见 §3「厂商私有参数」的优先级说明），或用环境变量对照。
 8. **VRAM 编码参数透传**：新增 `opts` 通道（`key=value;key=value`），
    `DynamicContext.opts` → 四个 `*_new_encoder()` FFI 新增 `const char *opts` 参数 →
    `util_encode::parse_opts()` / `has_opt()` / `opt_int()` / `opt_flag()` 拆表，
@@ -466,6 +476,12 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
      （HEVC 无 `MAX_NUM_REF_FRAMES`，该项只对 AVC 生效）
    - ffmpeg_vram：`preset` 按编码器名映射（nvenc p1-p7 / qsv veryfast-veryslow / amf speed-quality），
      qsv 额外支持 `low_power`/`low_delay_brc`/`async_depth`/`cavlc`
+   - ffmpeg_ram：与 ffmpeg_vram 共用 `util_encode::apply_qsv_vendor_opts()`，同样支持
+     qsv 的 `cavlc`/`low_power`/`low_delay_brc`/`async_depth`
+     （此前 RAM 通道**完全没有 opts 入口**，手动调 `async_depth` 会被内建默认静默盖掉 ——
+     vram 降级到 RAM 后调参"没反应"的根因）
+   - 两个 ffmpeg 通道都是"内建默认先下发、profile 后覆盖"，即手动值优先；
+     覆盖项逐 key 打 `qsv vendor opt override: <key>=<v>`，`hw encode params` 行补 `opts=<...>`
    - 三家原生路径各新增一行 `mfx/nvenc/amf encode params:` 日志
 
 ### 6. 硬件编码健壮性修复（探测超时 + 首帧空产出）
