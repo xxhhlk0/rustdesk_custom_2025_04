@@ -78,7 +78,7 @@ zbus = { version = "3.15", optional = true }
 #   其它解码器路径不变
 # branch: custom-1.4.9
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "707cace8deedc74951b24476b6c396f51ec3ee52"
+rev = "2b1fc29722763dc749f61d39a6c936e9cee8a19b"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
