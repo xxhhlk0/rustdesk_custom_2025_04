@@ -456,11 +456,75 @@ impl HwRamDecoder {
             thread_count: codec_thread_num(16) as _,
         })
     }
-    pub fn decode<'a>(&'a mut self, data: &[u8]) -> ResultType<Vec<HwRamDecoderImage<'a>>> {
-        match self.decoder.decode(data) {
-            Ok(v) => Ok(v.iter().map(|f| HwRamDecoderImage { frame: f }).collect()),
-            Err(e) => Err(anyhow!(e)),
+
+    #[cfg(target_os = "android")]
+    fn soft_info_of(format: DataFormat) -> Option<CodecInfo> {
+        let soft = CodecInfo::soft();
+        match format {
+            DataFormat::H264 => soft.h264,
+            DataFormat::H265 => soft.h265,
+            _ => None,
         }
+    }
+
+    /// mediacodec 解码失败时就地换成软解并重放当前包。
+    ///
+    /// 必须在这里兜住: mediacodec 走延迟 open (extradata 只能从码流首包取, 见
+    /// hwcodec cpp/common/annexb.h), 所以创建成功不代表本机真能出帧。失败若冒到
+    /// client.rs, 首帧失败会把整个 H264 标为不支持并上报服务端
+    /// (src/client.rs:2983), 影响面远大于回退软解。
+    ///
+    /// 只在软解能独立解出这一包时才换 —— 那说明该包是 IDR, 软解已被正确初始化。
+    #[cfg(target_os = "android")]
+    fn fallback_to_soft(&mut self, data: &[u8]) -> bool {
+        if !self.info.name.contains("mediacodec") {
+            return false;
+        }
+        let Some(soft) = Self::soft_info_of(self.info.format) else {
+            return false;
+        };
+        let Ok(mut decoder) = Self::create(&soft) else {
+            return false;
+        };
+        if decoder.decode(data).is_err() {
+            return false;
+        }
+        MEDIACODEC_DECODE_FAILED.fetch_or(
+            mediacodec_decode_bit(&self.info.name),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        log::warn!(
+            "{} decode failed, fallback to {}",
+            self.info.name,
+            soft.name
+        );
+        self.decoder = decoder;
+        self.info = soft;
+        true
+    }
+
+    pub fn decode<'a>(&'a mut self, data: &[u8]) -> ResultType<Vec<HwRamDecoderImage<'a>>> {
+        // 先把 Result 收敛成 Option<i32>, 否则 if let 的临时值会把 self 的可变
+        // 借用带到分支体里, 与下面的 fallback_to_soft(&mut self) 冲突。
+        let err = match self.decoder.decode(data) {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        };
+        if let Some(e) = err {
+            #[cfg(target_os = "android")]
+            let recovered = self.fallback_to_soft(data);
+            #[cfg(not(target_os = "android"))]
+            let recovered = false;
+            if !recovered {
+                return Err(anyhow!(e));
+            }
+        }
+        Ok(self
+            .decoder
+            .frames()
+            .iter()
+            .map(|f| HwRamDecoderImage { frame: f })
+            .collect())
     }
 }
 
