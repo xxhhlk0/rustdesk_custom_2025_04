@@ -420,9 +420,10 @@ cd D:/T/OpenCode/github-repos
 | 依赖 | 上游 | 本仓库指向 | 原因 |
 |---|---|---|---|
 | `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
-| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `d634ac0`（分支 `custom-1.4.9`） | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth`、`low_power`/`low_delay_brc`）+ 编码参数透传（preset 1-7 / rc / QP / 厂商私有项，VRAM 与 RAM 两通道）+ **手动设置的值优先于内建默认** |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `38ea39f`（分支 `custom-1.4.9`） | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth`、`low_power`/`low_delay_brc`）+ 编码参数透传（preset 1-7 / rc / QP / 厂商私有项，VRAM 与 RAM 两通道）+ **手动设置的值优先于内建默认** + **VRAM 硬编路径提速（VideoProcessor 状态缓存 + 耗时拆分日志）** |
 
-hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`、
+hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/common/platform/win/win.{h,cpp}`、
+`cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`、
 `cpp/ffmpeg_vram/ffmpeg_vram_{ffi.h,encode.cpp}`、`cpp/mfx/mfx_{ffi.h,encode.cpp}`、
 `cpp/nv/nv_{ffi.h,encode.cpp}`、`cpp/amf/amf_{ffi.h,encode.cpp}`、`src/vram/{mod,inner,encode}.rs`）：
 
@@ -483,6 +484,33 @@ hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/ffmpeg_ram/ffmpeg_ram_
    - 两个 ffmpeg 通道都是"内建默认先下发、profile 后覆盖"，即手动值优先；
      覆盖项逐 key 打 `qsv vendor opt override: <key>=<v>`，`hw encode params` 行补 `opts=<...>`
    - 三家原生路径各新增一行 `mfx/nvenc/amf encode params:` 日志
+9. **VRAM 硬编路径提速**（`cpp/common/platform/win/win.cpp::NativeDevice::Process()` +
+   `cpp/ffmpeg_vram/ffmpeg_vram_encode.cpp`）：
+
+   背景：2560x1440@120 虚拟屏被控端，同一个 `h264_qsv`、同一套参数下，
+   **VRAM 通道 `avg_enc` 12.7~17.5ms，RAM 通道只要 2.3~3.3ms**；而 VRAM 的采集
+   （`avg_cap` 0.2~2.9ms）又比 RAM（8~12ms，GPU→CPU 回读）快得多。
+   Rust 侧 `video enc stats` 的 `avg_enc` 把「BGRA→NV12 转换」和「编码器取包」算在一起，
+   所以一直分不出是哪一段慢。
+
+   - `Process()` 里 4 个 VideoProcessor 流状态（stream/output 颜色空间 + source/dest rect）
+     此前**每帧都重下发**。`ID3D11VideoContext1::SetStream|OutputColorSpace1` 会让驱动重新
+     配置整条 CSC 管线；而本路径的取值在一次会话内是常量（`bt709_`/`full_range_` 是 const
+     成员，rect 由 width/height 决定）—— Chromium 的 `d3d11_video_processor_proxy` 与
+     Media Foundation 的编码器都**只在创建 VideoProcessor 时设一次**。现改为变更时才下发，
+     缓存随 `video_processor_` 重建一起失效。
+   - 删掉 `Process()` 开头两个**从未被读取**的 `inDesc`/`outDesc`（上游遗留，每帧白跑 2 次
+     驱动的 `GetDesc`）。
+   - 新增两行耗时拆分日志（各 1000ms 一行，与 `video enc stats` 同频）：
+     - `vp detail: frames=N, state=Xms, view=Yms, blt=Zms`
+       —— `state` = 上面那 4 个状态下发，`view` = 输入/输出 view 创建（已缓存，通常 0），
+       `blt` = `VideoProcessorBlt` 本身。
+     - `vram enc detail: frames=N, convert=Xms, encode=Yms (send=Ams, recv=Bms), total=Cms`
+       —— `convert` = BGRA→NV12，`encode` = `avcodec_send_frame` + 取包；
+       `send` 大 = 卡在等 VideoProcessor 写完，`recv` 大 = 编码器管线没跟上。
+
+   **判据**：修好后 `avg_enc` 应接近 RAM 通道的量级；若 `blt` 仍占大头，说明瓶颈在
+   VideoProcessor 本身（虚拟显示纹理的驱动路径），需换转换方式而不是继续调参。
 
 ### 6. 硬件编码健壮性修复（探测超时 + 首帧空产出）
 

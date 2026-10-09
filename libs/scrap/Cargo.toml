@@ -79,9 +79,12 @@ zbus = { version = "3.15", optional = true }
 # + 编码参数优先级: 手动设置 (profile) 覆盖内建默认。ffmpeg_ram 通道补齐 opts
 #   透传 (此前 RAM 通道没有入口, async_depth/low_power 被内建默认静默盖掉),
 #   两个通道共用 apply_qsv_vendor_opts, 每个覆盖项打一行日志
+# + VRAM 编码提速: VideoProcessor 的颜色空间/rect 不再每帧重下发 (只在变更时),
+#   删掉 Process() 里两个从未被读取的 GetDesc; 新增 vp detail / vram enc detail
+#   耗时拆分日志 (convert 与 encode 分开, 否则 Rust 侧 avg_enc 看不出谁慢)
 # branch: custom-1.4.9
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "d634ac0e0b133640338113d413d94876b884f766"
+rev = "38ea39ff208d08e0d7bd3f9c813647e6f7db6ea9"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
