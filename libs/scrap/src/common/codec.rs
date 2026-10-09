@@ -1115,6 +1115,19 @@ pub fn codec_thread_num(limit: usize) -> usize {
     res
 }
 
+/// 软解 (libx264/libx265) 的切片线程数 = CPU 物理核心数 (不含超线程)。
+///
+/// 与 `codec_thread_num` 的区别: 那个函数的 `min(可用内存/2)` 是给 libaom/vpx
+/// **编码**设计的 (参考帧 + 率控缓冲), 解码沿用会把 8 核手机钳到 1 线程
+/// (实测 available memory 3G -> memory/2 = 1), 4K 软解只有 10~20fps。
+/// 解码的切片线程共享帧缓冲, 每线程开销仅 MB 级, 不需要内存钳制。
+///
+/// 取物理核而非逻辑核: 超线程对解码收益极小 (解码是计算密集 + cache 敏感),
+/// 两个逻辑核抢 cache 反而可能让单帧延迟上升。
+pub fn soft_decode_threads() -> i32 {
+    num_cpus::get_physical().max(1) as _
+}
+
 fn disable_av1() -> bool {
     // aom is very slow for x86 sciter version on windows x64
     // disable it for all 32 bit platforms

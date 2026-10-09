@@ -1,7 +1,7 @@
 use crate::{
     codec::{
-        base_bitrate, codec_thread_num, enable_hwcodec_option, EncoderApi, EncoderCfg,
-        HwEncoderParams,
+        base_bitrate, codec_thread_num, enable_hwcodec_option, soft_decode_threads, EncoderApi,
+        EncoderCfg, HwEncoderParams,
     },
     convert::*,
     CodecFormat, EncodeInput, ImageFormat, ImageRgb, Pixfmt, HW_STRIDE_ALIGN,
@@ -453,11 +453,29 @@ impl HwRamDecoder {
         }
     }
 
+    /// 软解 (libx264/libx265): priority=Soft (见 hwcodec `CodecInfo::soft()`)。
+    /// 名字再挡一道 mediacodec/videotoolbox —— 它们的 hwdevice 也是 NONE
+    /// (ffmpeg 的 mediacodec wrapper 不走 hwcontext), 但它们是硬解, 线程由
+    /// 框架自管, 不能按软解对待。
+    fn is_soft(info: &CodecInfo) -> bool {
+        info.priority == hwcodec::ffmpeg_ram::Priority::Soft as i32
+            && !info.name.contains("mediacodec")
+            && !info.name.contains("videotoolbox")
+    }
+
     fn create(info: &CodecInfo) -> Result<Decoder, ()> {
         Decoder::new(DecodeContext {
             name: info.name.clone(),
             device_type: info.hwdevice.clone(),
-            thread_count: codec_thread_num(16) as _,
+            // 软解: 物理核心数, 不做动态/内存钳制 (见 soft_decode_threads)。
+            // 硬解: D3D11VA 由 hwcodec C 侧强制 thread_count=1 (GPU 异步,
+            // ffmpeg 线程只提交包/取帧); mediacodec 的 thread_count 被
+            // ffmpeg wrapper 忽略 (线程由 Android MediaCodec 框架自管)。
+            thread_count: if Self::is_soft(info) {
+                soft_decode_threads()
+            } else {
+                1
+            },
         })
     }
 

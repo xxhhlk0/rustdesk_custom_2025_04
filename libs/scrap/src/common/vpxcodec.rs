@@ -8,7 +8,7 @@ use hbb_common::log;
 use hbb_common::message_proto::{Chroma, EncodedVideoFrame, EncodedVideoFrames, VideoFrame};
 use hbb_common::ResultType;
 
-use crate::codec::{base_bitrate, codec_thread_num, EncoderApi};
+use crate::codec::{base_bitrate, codec_thread_num, soft_decode_threads, EncoderApi};
 use crate::{EncodeInput, EncodeYuvFormat, GoogleImage, Pixfmt, STRIDE_ALIGN};
 
 use super::vpx::{vp8e_enc_control_id::*, vpx_codec_err_t::*, *};
@@ -449,7 +449,10 @@ impl VpxDecoder {
         };
         let mut ctx = Default::default();
         let cfg = vpx_codec_dec_cfg_t {
-            threads: codec_thread_num(64) as _,
+            // 解码: 物理核心数, 不做内存钳制 (见 codec::soft_decode_threads)。
+            // codec_thread_num 的 min(内存/2) 是给编码的参考帧/率控缓冲设计的,
+            // 解码沿用会把 8 核手机钳到 1 线程。
+            threads: soft_decode_threads() as _,
             w: 0,
             h: 0,
         };

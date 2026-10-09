@@ -6,7 +6,7 @@
 
 include!(concat!(env!("OUT_DIR"), "/aom_ffi.rs"));
 
-use crate::codec::{base_bitrate, codec_thread_num};
+use crate::codec::{base_bitrate, codec_thread_num, soft_decode_threads};
 use crate::{codec::EncoderApi, EncodeFrame, STRIDE_ALIGN};
 use crate::{common::GoogleImage, generate_call_macro, generate_call_ptr_macro, Error, Result};
 use crate::{EncodeInput, EncodeYuvFormat, Pixfmt};
@@ -466,7 +466,10 @@ impl AomDecoder {
         let i = call_aom_ptr!(aom_codec_av1_dx());
         let mut ctx = Default::default();
         let cfg = aom_codec_dec_cfg_t {
-            threads: codec_thread_num(64) as _,
+            // 解码: 物理核心数, 不做内存钳制 (见 codec::soft_decode_threads)。
+            // codec_thread_num 的 min(内存/2) 是给编码的参考帧/率控缓冲设计的,
+            // 解码沿用会把 8 核手机钳到 1 线程。
+            threads: soft_decode_threads() as _,
             w: 0,
             h: 0,
             allow_lowbitdepth: 1,
