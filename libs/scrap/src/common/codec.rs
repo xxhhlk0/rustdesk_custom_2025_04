@@ -847,16 +847,24 @@ impl Decoder {
         rgb: &mut ImageRgb,
         i420: &mut Vec<u8>,
     ) -> ResultType<bool> {
-        let mut ret = false;
+        let mut converted = false;
+        let mut got_image = false;
         for h264 in frames.frames.iter() {
             for image in decoder.decode(&h264.data)? {
                 // TODO: just process the last frame
+                got_image = true;
                 if image.to_fmt(rgb, i420).is_ok() {
-                    ret = true;
+                    converted = true;
                 }
             }
         }
-        return Ok(ret);
+        // 无帧 ≠ 失败: 硬解是异步流水线, 输入缓冲填满前 receive 恒 EAGAIN,
+        // 首帧往往要等好几个包 (hwcodec do_decode 已把 EAGAIN 当"暂无输出")。
+        // 返回 Ok(true) 表示"本批包处理成功", 含"暂无输出"; 真失败由 decode() 的
+        // Err 体现。否则 client.rs 的首帧判定会把 fail_counter 直接跳到 MAX 并把
+        // H264 标为不支持, 服务端随之退到 AV1 软编 (实测 3840x2400 超手机硬解上限
+        // 4096x2176 时就是这条路径)。
+        Ok(!got_image || converted)
     }
 
     #[cfg(feature = "vram")]

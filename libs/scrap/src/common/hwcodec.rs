@@ -516,10 +516,24 @@ impl HwRamDecoder {
         };
         if let Some(e) = err {
             #[cfg(target_os = "android")]
-            let recovered = self.fallback_to_soft(data);
+            {
+                if self.fallback_to_soft(data) {
+                    // 已换成软解并重放过当前包, 走下面的 frames() 取帧
+                } else {
+                    // 软解也解不出当前包 —— 多数是当前包非 IDR, 软解需要关键帧
+                    // 才能起。这不等于码流损坏, 返回 Ok(空) 让上层继续等下一个包
+                    // (下次 decode 仍会重试 fallback, 直到碰到 IDR)。否则 client.rs
+                    // 的 fail_counter 会在 3 次连续 Err 后把 H264 标为不支持, 服务端
+                    // 退到 AV1 软编 —— 比多等几个包糟糕得多。
+                    log::warn!(
+                        "{}, fallback to soft pending (wait for key frame)",
+                        e.to_string()
+                    );
+                    return Ok(vec![]);
+                }
+            }
             #[cfg(not(target_os = "android"))]
-            let recovered = false;
-            if !recovered {
+            {
                 return Err(anyhow!(e));
             }
         }
