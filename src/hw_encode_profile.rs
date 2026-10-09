@@ -445,6 +445,11 @@ pub fn pinned_fps() -> Option<u32> {
     p.fps.filter(|v| *v > 0).map(|v| v as u32)
 }
 
+/// profile 显式指定的固定码率 (kbps)。Some 时码率由 profile 决定, 不跟随控制端选档。
+pub fn pinned_bitrate() -> Option<u32> {
+    active_profile()?.kbs
+}
+
 /// 转换为 scrap 编码器参数; record=true 时 gop 覆盖让位给录制用的 240 帧关键帧间隔。
 /// VRAM 通道 (本 hwcodec fork) 同样接收 preset/rc/q/画质增强/厂商私有参数。
 #[cfg(feature = "hwcodec")]

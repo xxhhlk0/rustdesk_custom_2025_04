@@ -1501,15 +1501,23 @@ fn check_qos(
     if let Some(fps) = crate::hw_encode_profile::pinned_fps() {
         *spf = Duration::from_secs_f32(1. / (fps as f32));
     }
-    // 硬件编码 profile: bitrate_adaptive=false 时抑制运行期动态码率调整 (保持 profile 固定码率/参数);
+    // 硬件编码 profile: bitrate_adaptive=false 时抑制 VideoQoS 的运行期动态码率调整,
+    // 码率目标改由控制端显式选档决定; profile 指定 kbs 时码率固定, 不做运行期调整。
     // 录制状态切换与显示数据更新不受影响。
     let bitrate_adaptive = crate::hw_encode_profile::bitrate_adaptive();
-    if bitrate_adaptive && *ratio != video_qos.ratio() {
-        *ratio = video_qos.ratio();
+    let target_ratio = if bitrate_adaptive {
+        video_qos.ratio()
+    } else if crate::hw_encode_profile::pinned_bitrate().is_some() {
+        *ratio
+    } else {
+        video_qos.latest_quality().ratio()
+    };
+    if *ratio != target_ratio {
+        *ratio = target_ratio;
         if encoder.support_changing_quality() {
             allow_err!(encoder.set_quality(*ratio));
             video_qos.store_bitrate(encoder.bitrate());
-        } else {
+        } else if bitrate_adaptive {
             // Now only vaapi doesn't support changing quality
             if !video_qos.in_vbr_state() && !video_qos.latest_quality().is_custom() {
                 log::info!("switch to change quality");
