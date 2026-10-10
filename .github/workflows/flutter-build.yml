@@ -1994,9 +1994,8 @@ jobs:
             echo "Retrying vcpkg setup..."
             rm -rf /opt/artifacts/vcpkg || true
 
-      # vcpkg 2026.07.29's SPDX scripts require CMake 4.3+, but this ARM64 runner selects CMake 3.31.
-      - name: Install CMake for vcpkg on Linux ARM64
-        if: matrix.job.arch == 'aarch64' && env.UPLOAD_ARTIFACT == 'true'
+      # vcpkg 2026.07.29's SPDX scripts require CMake 4.3+, runners ship CMake 3.31.
+      - name: Install CMake for vcpkg
         run: |
           python3 -m pip install --user "cmake==${VCPKG_CMAKE_VERSION}"
           user_base="$(python3 -m site --user-base)"
@@ -2377,6 +2376,14 @@ jobs:
           on_retry_command: |
             echo "Retrying vcpkg setup..."
             rm -rf /opt/artifacts/vcpkg || true
+
+      # vcpkg 2026.07.29's SPDX scripts require CMake 4.3+, runners ship CMake 3.31.
+      - name: Install CMake for vcpkg
+        run: |
+          python3 -m pip install --user "cmake==${VCPKG_CMAKE_VERSION}"
+          user_base="$(python3 -m site --user-base)"
+          "${user_base}/bin/cmake" --version
+          echo "${user_base}/bin" >> "${GITHUB_PATH}"
 
       - name: Set VCPKG_ROOT
         run: echo "VCPKG_ROOT=/opt/artifacts/vcpkg" >> $GITHUB_ENV
@@ -2770,6 +2777,12 @@ jobs:
               git reset --hard ${{ env.ARMV7_VCPKG_COMMIT_ID }}
               CC=/usr/bin/gcc-8 CXX=/usr/bin/g++-8 sh bootstrap-vcpkg.sh -disableMetrics
             else
+              # vcpkg 2026.07.29's SPDX scripts require CMake 4.3+; distro cmake is far older
+              wget --quiet --output-document cmake.tar.gz \
+                "https://github.com/Kitware/CMake/releases/download/v${{ env.VCPKG_CMAKE_VERSION }}/cmake-${{ env.VCPKG_CMAKE_VERSION }}-linux-${{ matrix.job.arch }}.tar.gz"
+              tar -C /opt -xzf cmake.tar.gz
+              rm cmake.tar.gz
+              export PATH="/opt/cmake-${{ env.VCPKG_CMAKE_VERSION }}-linux-${{ matrix.job.arch }}/bin:$PATH"
               git reset --hard ${{ env.VCPKG_COMMIT_ID }}
               sh bootstrap-vcpkg.sh -disableMetrics
             fi
