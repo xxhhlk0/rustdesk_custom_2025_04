@@ -116,6 +116,38 @@ impl DxgiRecoveryState {
         std::mem::take(&mut self.fallback_pending)
     }
 }
+// 诊断: 被控端每帧三段耗时 (微秒), 由视频主循环每秒 swap 读取并清零。
+// snapshot: 订阅者检查; encode: GPU 编码 + 构造消息; send: 投递到发送队列。
+static STAT_SNAP_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STAT_ENC_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STAT_SEND_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// 诊断: 单帧耗时分布 (4ms 一桶, 0-47ms 共 12 桶), 由采集/编码处累积, 每秒打印。
+// 用于确认串行流水线下单帧 cap+enc 是否偶发超 spf_target 导致掉帧。
+const DIAG_NBUCKET: usize = 12;
+fn diag_bucket(us: u64) -> usize {
+    ((us / 4000).min((DIAG_NBUCKET - 1) as u64)) as usize
+}
+fn diag_dump(arr: &[std::sync::atomic::AtomicU64; DIAG_NBUCKET]) -> ([u64; DIAG_NBUCKET], u64) {
+    let mut v = [0u64; DIAG_NBUCKET];
+    let mut total = 0u64;
+    for (i, b) in arr.iter().enumerate() {
+        v[i] = b.swap(0, std::sync::atomic::Ordering::Relaxed);
+        total += v[i];
+    }
+    (v, total)
+}
+use std::sync::atomic::AtomicU64 as AU64;
+static DIAG_CAP_BUCKETS: [AU64; DIAG_NBUCKET] = [
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+];
+static DIAG_ENC_BUCKETS: [AU64; DIAG_NBUCKET] = [
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+    AU64::new(0), AU64::new(0), AU64::new(0), AU64::new(0),
+];
 
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
@@ -627,6 +659,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(windows)]
     let dxgi_recovery_state = vs.dxgi_recovery_state.clone();
     let sp = vs.sp;
+    let active_hw_profile = crate::hw_encode_profile::refresh_active_profile();
     let mut c = get_capturer(vs.source, display_idx, last_portable_service_running)?;
     #[cfg(windows)]
     // ACCESS_LOST marks the next successful capturer creation as a recovery. This timestamp is
@@ -730,8 +763,30 @@ fn run(vs: VideoService) -> ResultType<()> {
     let capture_width = c.width;
     let capture_height = c.height;
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
+    // 诊断统计 (每秒一行): 定位 fps 瓶颈在采集超时 / 每帧耗时 / 等待控制端取帧
+    let mut stat_instant = Instant::now();
+    let mut stat_loops = 0u32;
+    let mut stat_would_block = 0u32;
+    let mut stat_cost_us = 0u64;
+    let mut stat_fetch_us = 0u64;
+    let mut stat_succ = 0u32;
+    let mut stat_cap_us = 0u64;
+    let mut stat_convert_us = 0u64;
+    let mut stat_handle_us = 0u64;
+    // 固定节拍用的绝对 deadline (见循环末尾): Windows 的 sleep 精度很差,
+    // 16.7ms 目标下每轮多睡 1~2ms 就会把 60fps 拖成 ~54fps。
+    let mut frame_deadline = Instant::now();
+    let mut profile_check_instant = Instant::now();
 
     while sp.ok() {
+        if profile_check_instant.elapsed() >= Duration::from_millis(500) {
+            profile_check_instant = Instant::now();
+            let current_profile = crate::hw_encode_profile::refresh_active_profile();
+            if current_profile != active_hw_profile {
+                log::info!("hardware encode profile changed, recreating encoder");
+                bail!("SWITCH");
+            }
+        }
         #[cfg(windows)]
         check_uac_switch(c.privacy_mode_id, c._capturer_privacy_mode_id)?;
         check_qos(
@@ -744,11 +799,24 @@ fn run(vs: VideoService) -> ResultType<()> {
             &sp.name(),
         )?;
         if sp.is_option_true(OPTION_REFRESH) {
+            // 先消费掉选项 (一次性), 否则每帧都会进来
+            sp.set_option_bool(OPTION_REFRESH, false);
             if vs.source.is_monitor() {
+                // 显示真变了 (分辨率/位置) → try_broadcast_display_changed
+                // 内部检测到变化会 bail!("SWITCH") 走完整重建
                 let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
             }
-            log::info!("switch to refresh");
-            bail!("SWITCH");
+            // 显示没变 = 客户端丢帧后请求同步 / 手动刷新 → 只强制 IDR。
+            // 旧逻辑无条件 bail!("SWITCH") 重启整个 video service, 会导致
+            // fps=0 的帧空洞 (stop + new service + 重建编码器), 手机端帧积压
+            // 触发 reduce delay 时尤其严重 (每 1.4 秒崩一次)。
+            if encoder.force_keyframe().is_ok() {
+                log::info!("force keyframe (OPTION_REFRESH, no display change)");
+            } else {
+                // 编码器不支持强制 IDR → 退回旧行为
+                log::info!("switch to refresh (force_keyframe unsupported)");
+                bail!("SWITCH");
+            }
         }
         if codec_format != Encoder::negotiated_codec() {
             log::info!(
@@ -796,8 +864,17 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         let time = now - start;
         let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
-        let res = match c.frame(spf) {
+        let stat_cap_begin = Instant::now();
+        // 按 present 节奏取帧: 阻塞等下一帧到达, 不用固定周期截断取帧窗口。
+        // 超时只为让静止画面上的循环继续轮转, 不丢帧 (下一轮会等到同一帧)。
+        const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(50);
+        let res = match c.frame(ACQUIRE_TIMEOUT) {
             Ok(frame) => {
+                let stat_cap_elapsed = stat_cap_begin.elapsed().as_micros() as u64;
+                stat_cap_us += stat_cap_elapsed;
+                DIAG_CAP_BUCKETS[diag_bucket(stat_cap_elapsed)]
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                stat_succ += 1;
                 repeat_encode_counter = 0;
                 if frame.valid() {
                     let screenshot_key = (vs.source, display_idx);
@@ -847,7 +924,10 @@ fn run(vs: VideoService) -> ResultType<()> {
                         }
                     }
 
+                    let stat_convert_begin = Instant::now();
                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
+                    stat_convert_us += stat_convert_begin.elapsed().as_micros() as u64;
+                    let stat_handle_begin = Instant::now();
                     let send_conn_ids = handle_one_frame(
                         display_idx,
                         &sp,
@@ -860,6 +940,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         capture_width,
                         capture_height,
                     )?;
+                    stat_handle_us += stat_handle_begin.elapsed().as_micros() as u64;
                     frame_controller.set_send(now, send_conn_ids);
                     send_counter += 1;
                 }
@@ -878,6 +959,7 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         match res {
             Err(ref e) if e.kind() == WouldBlock => {
+                stat_would_block += 1;
                 #[cfg(windows)]
                 if dxgi_recovery_started
                     .map(|started| started.elapsed() >= DXGI_RECOVERY_FRAME_GRACE)
@@ -985,13 +1067,74 @@ fn run(vs: VideoService) -> ResultType<()> {
                 break;
             }
         }
+        stat_fetch_us += wait_begin.elapsed().as_micros() as u64;
         DISPLAY_CONN_IDS.lock().unwrap().remove(&display_idx);
 
         let elapsed = now.elapsed();
+        stat_cost_us += elapsed.as_micros() as u64;
         // may need to enable frame(timeout)
         log::trace!("{:?} {:?}", time::Instant::now(), elapsed);
-        if elapsed < spf {
-            std::thread::sleep(spf - elapsed);
+        // 固定节拍: 用累加的绝对 deadline 而不是 sleep(spf - elapsed)。
+        // 实测 (1440p@120 虚拟屏被控端) 每轮 sleep 会多睡 1~2ms (Windows 定时器
+        // 精度), 循环被拖到 ~18.5ms -> 只有 ~54fps; 且循环开头到 `now` 之间的
+        // 检查开销也没算进 elapsed。绝对 deadline 能同时吸收这两者, 末尾自旋
+        // 补掉 sleep 的过冲, 周期才会精确等于 spf。
+        frame_deadline += spf;
+        let tail_now = Instant::now();
+        if tail_now < frame_deadline {
+            let remain = frame_deadline - tail_now;
+            const SPIN_BUDGET: Duration = Duration::from_millis(3);
+            if remain > SPIN_BUDGET {
+                std::thread::sleep(remain - SPIN_BUDGET);
+            }
+            while Instant::now() < frame_deadline {
+                std::hint::spin_loop();
+            }
+        } else if tail_now > frame_deadline + spf {
+            // 落后超过一个周期 (切换/卡顿): 重新对齐, 避免追补性爆发
+            frame_deadline = tail_now;
+        }
+        stat_loops += 1;
+        if stat_instant.elapsed().as_millis() >= 1000 {
+            let stat_ms = stat_instant.elapsed().as_millis().max(1) as f64;
+            let stat_succ_f = stat_succ.max(1) as f64;
+            let stat_snap_us = STAT_SNAP_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let stat_enc_us = STAT_ENC_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let stat_send_us = STAT_SEND_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+            log::info!(
+                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms, avg_snap={:.2}ms, avg_enc={:.1}ms, avg_send={:.1}ms",
+                spf.as_secs_f32() * 1000.0,
+                stat_loops as f64 * 1000.0 / stat_ms,
+                send_counter,
+                stat_would_block,
+                stat_cost_us as f64 / 1000.0 / stat_loops.max(1) as f64,
+                stat_fetch_us as f64 / 1000.0 / stat_loops.max(1) as f64,
+                stat_succ,
+                stat_cap_us as f64 / 1000.0 / stat_succ_f,
+                stat_convert_us as f64 / 1000.0 / stat_succ_f,
+                stat_handle_us as f64 / 1000.0 / stat_succ_f,
+                stat_snap_us as f64 / 1000.0 / stat_succ_f,
+                stat_enc_us as f64 / 1000.0 / stat_succ_f,
+                stat_send_us as f64 / 1000.0 / stat_succ_f,
+            );
+            {
+                // 单帧耗时直方图 (cap/enc), 每桶 4ms: [0-4,4-8,...40+]
+                let diag_cap = diag_dump(&DIAG_CAP_BUCKETS);
+                let diag_enc = diag_dump(&DIAG_ENC_BUCKETS);
+                log::info!(
+                    "dist cap(4ms/bucket): {:?} total={} | enc(4ms/bucket): {:?} total={}",
+                    diag_cap.0, diag_cap.1, diag_enc.0, diag_enc.1
+                );
+            }
+            stat_instant = Instant::now();
+            stat_loops = 0;
+            stat_would_block = 0;
+            stat_cost_us = 0;
+            stat_fetch_us = 0;
+            stat_succ = 0;
+            stat_cap_us = 0;
+            stat_convert_us = 0;
+            stat_handle_us = 0;
         }
     }
 
@@ -1077,9 +1220,20 @@ fn get_encoder_config(
     }
     #[cfg(feature = "vram")]
     Encoder::update(scrap::codec::EncodingUpdate::Check);
-    // https://www.wowza.com/community/t/the-correct-keyframe-interval-in-obs-studio/95162
-    let keyframe_interval = if record { Some(240) } else { None };
+    // 默认关键帧间隔为编码帧率的 20 倍; 录制仍固定为 240 帧。
+    let profile_fps = crate::hw_encode_profile::active_profile()
+        .and_then(|profile| profile.fps)
+        .unwrap_or(30)
+        .max(1) as usize;
+    let keyframe_interval = if record {
+        Some(240)
+    } else {
+        Some(profile_fps.saturating_mul(20))
+    };
     let negotiated_codec = Encoder::negotiated_codec();
+    // 硬件编码 profile (预置档/自定义 + 按客户端覆盖)
+    #[cfg(feature = "hwcodec")]
+    let hw_params = crate::hw_encode_profile::hw_params(record);
     match negotiated_codec {
         CodecFormat::H264 | CodecFormat::H265 => {
             #[cfg(feature = "vram")]
@@ -1091,6 +1245,10 @@ fn get_encoder_config(
                     quality,
                     feature,
                     keyframe_interval,
+                    #[cfg(feature = "hwcodec")]
+                    params: hw_params.clone(),
+                    #[cfg(not(feature = "hwcodec"))]
+                    params: None,
                 });
             }
             #[cfg(feature = "hwcodec")]
@@ -1102,6 +1260,7 @@ fn get_encoder_config(
                     height: c.height,
                     quality,
                     keyframe_interval,
+                    params: hw_params.clone(),
                 });
             }
             EncoderCfg::VPX(VpxEncoderConfig {
@@ -1246,6 +1405,7 @@ fn handle_one_frame(
     width: usize,
     height: usize,
 ) -> ResultType<HashSet<i32>> {
+    let stat_snap_begin = Instant::now();
     sp.snapshot(|sps| {
         // so that new sub and old sub share the same encoder after switch
         if sps.has_subscribes() {
@@ -1254,12 +1414,24 @@ fn handle_one_frame(
         }
         Ok(())
     })?;
+    STAT_SNAP_US.fetch_add(
+        stat_snap_begin.elapsed().as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     let mut send_conn_ids: HashSet<i32> = Default::default();
     let first = *first_frame;
     *first_frame = false;
+    let stat_enc_begin = Instant::now();
     match encoder.encode_to_message(frame, ms) {
         Ok(mut vf) => {
+            let stat_enc_elapsed = stat_enc_begin.elapsed().as_micros() as u64;
+            STAT_ENC_US.fetch_add(
+                stat_enc_elapsed,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            DIAG_ENC_BUCKETS[diag_bucket(stat_enc_elapsed)]
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *encode_fail_counter = 0;
             vf.display = display as _;
             let mut msg = Message::new();
@@ -1269,9 +1441,18 @@ fn handle_one_frame(
                 .unwrap()
                 .as_mut()
                 .map(|r| r.write_message(&msg, width, height));
+            let stat_send_begin = Instant::now();
             send_conn_ids = sp.send_video_frame(msg);
+            STAT_SEND_US.fetch_add(
+                stat_send_begin.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
         Err(e) => {
+            // vram 异步编码流水线: 帧已提交但包未产出, 不是错误
+            if e.to_string() == scrap::codec::ENCODE_PENDING {
+                return Ok(send_conn_ids);
+            }
             *encode_fail_counter += 1;
             // Encoding errors are not frequent except on Android
             if !cfg!(target_os = "android") {
@@ -1426,12 +1607,29 @@ fn check_qos(
 ) -> ResultType<()> {
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     *spf = video_qos.spf();
-    if *ratio != video_qos.ratio() {
-        *ratio = video_qos.ratio();
+    // 硬件编码 profile: pin_fps 时忽略 VideoQoS 的帧率自适应, 直接固定出帧间隔
+    // (VideoQoS 默认从 INIT_FPS=15 起按延迟爬升, 且延迟升高时主动降帧;
+    //  这里固定后网络拥塞表现为卡顿而非降帧, 属用户显式选择的取舍)
+    if let Some(fps) = crate::hw_encode_profile::pinned_fps() {
+        *spf = Duration::from_secs_f32(1. / (fps as f32));
+    }
+    // 硬件编码 profile: bitrate_adaptive=false 时抑制 VideoQoS 的运行期动态码率调整,
+    // 码率目标改由控制端显式选档决定; profile 指定 kbs 时码率固定, 不做运行期调整。
+    // 录制状态切换与显示数据更新不受影响。
+    let bitrate_adaptive = crate::hw_encode_profile::bitrate_adaptive();
+    let target_ratio = if bitrate_adaptive {
+        video_qos.ratio()
+    } else if crate::hw_encode_profile::pinned_bitrate().is_some() {
+        *ratio
+    } else {
+        video_qos.latest_quality().ratio()
+    };
+    if *ratio != target_ratio {
+        *ratio = target_ratio;
         if encoder.support_changing_quality() {
             allow_err!(encoder.set_quality(*ratio));
             video_qos.store_bitrate(encoder.bitrate());
-        } else {
+        } else if bitrate_adaptive {
             // Now only vaapi doesn't support changing quality
             if !video_qos.in_vbr_state() && !video_qos.latest_quality().is_custom() {
                 log::info!("switch to change quality");
