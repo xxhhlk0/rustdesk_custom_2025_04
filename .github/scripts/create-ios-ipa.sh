@@ -17,7 +17,7 @@
 #   (同样是 一次 archive -> 分别产出未签名 / 越狱版, 差异只在 ldid 注入)
 #
 # 用法 (在仓库任意位置均可):
-#   VERSION=1.4.9 bash .github/scripts/create-ios-ipa.sh
+#   VERSION=1.5.0 bash .github/scripts/create-ios-ipa.sh
 #
 # 可用环境变量覆盖:
 #   VERSION           产物文件名里的版本号 (默认 0.0.0)

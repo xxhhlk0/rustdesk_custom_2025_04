@@ -2,25 +2,24 @@
 
 ## 概述
 
-本项目基于官方 RustDesk **1.4.9** 版本进行自定义构建（已从 1.4.6 rebase 同步到上游 1.4.9 发版 tag），所有构建产物上传到 Cloudflare R2 私有存储，不依赖 GitHub Artifacts，适合公开仓库使用。
+本项目基于官方 RustDesk **1.5.0** 版本进行自定义构建（已从 1.4.6 → 1.4.9 → 1.5.0 逐版同步到上游发版 tag），所有构建产物上传到 Cloudflare R2 私有存储，不依赖 GitHub Artifacts，适合公开仓库使用。
 
 ### 版本锚点
 
 | 对象 | 当前值 |
 |---|---|
-| 上游基点 | rustdesk/rustdesk `1.4.9`（`6c578292`） |
-| 自定义提交数 | **52**（截至 tag `1.4.9-custom.9`） |
-| 最新 tag | `1.4.9-custom.9` |
+| 上游基点 | rustdesk/rustdesk `1.5.0`（`fada664d`） |
+| 相对上游改动 | **45 个文件**（`git diff --name-only upstream/master HEAD`） |
 | 相关 fork | `xxhhlk0/hbb_common`、`xxhhlk0/hwcodec`（见「自定义功能 §5 依赖的 fork」） |
 
-> tag 命名规则：`1.4.9-custom.<N>`，每个 tag 对应一次实质提交。
+> 1.5.0 同步方式：以官方 1.5.0 树为基底重建工作区，本地自定义按功能块逐条回补，见 `git log` 中 `chore(sync): rebase 基底到上游 rustdesk 1.5.0` 之后的提交。
 > 所有 workflow 均为 `workflow_dispatch`（无 push/tag 自动触发），**打 tag 不会触发构建**，需手动 dispatch。
 
 ## 主要修改
 
 ### 1. 工作流同步与简化
 
-- 以官方 rustdesk/rustdesk 1.4.9 版本 workflows 为底，保留全部自定义改动
+- 以官方 rustdesk/rustdesk 1.5.0 版本 workflows 为底，保留全部自定义改动
 - 移除所有自动触发条件（schedule、push、pull_request、release），仅保留手动触发（workflow_dispatch）
 
 ### 2. 产物存储方案
@@ -50,7 +49,7 @@
 │       ├── rustdesk-{VERSION}-x86_64.deb
 │       └── rustdesk-{VERSION}-x86_64-sciter.deb
 │
-└── 1.4.9/{DATE}/                 # 最终产物（长期保存）
+└── 1.5.0/{DATE}/                 # 最终产物（长期保存）
     ├── windows/x86_64/
     │   ├── rustdesk-{VERSION}-x86_64.exe
     │   └── rustdesk-{VERSION}-x86_64.msi
@@ -148,17 +147,17 @@
 
 ```bash
 # 列出所有构建
-aws s3 ls s3://{R2_BUCKET}/1.4.9/ --endpoint-url {R2_ENDPOINT_URL} --region auto
+aws s3 ls s3://{R2_BUCKET}/1.5.0/ --endpoint-url {R2_ENDPOINT_URL} --region auto
 
 # 下载文件
-aws s3 cp s3://{R2_BUCKET}/1.4.9/20260425/windows/x86_64/rustdesk-1.4.9-x86_64.exe . \
+aws s3 cp s3://{R2_BUCKET}/1.5.0/20261011/windows/x86_64/rustdesk-1.5.0-x86_64.exe . \
   --endpoint-url {R2_ENDPOINT_URL} \
   --region auto
 ```
 
 ## 修改的文件
 
-相对上游 1.4.9 共改动 38 个文件（`git diff --name-only 1.4.9 HEAD`）。
+相对上游 1.5.0 共改动 45 个文件（`git diff --name-only upstream/master HEAD`）。
 
 ### CI / 构建
 
@@ -187,6 +186,7 @@ aws s3 cp s3://{R2_BUCKET}/1.4.9/20260425/windows/x86_64/rustdesk-1.4.9-x86_64.e
 | `src/server/video_service.rs` | 注入编码参数；`check_qos` 按 `bitrate_adaptive` + `pin_fps` 门控；`disable_vram` 挂载 |
 | `src/server/connection.rs` | 连接建立时挂载 per-client profile |
 | `src/lib.rs` | 注册 `hw_encode_profile` 模块 |
+| `libs/base/src/config/keys.rs` | 新增 `OPTION_HW_ENCODE_PROFILE` option key（上游 1.5.0 已把 `config::keys` 从 hbb_common 移入 `libs/base`） |
 | `src/platform/windows.rs`、`windows.cc` | 选择可用用户桌面以启动 `--server`（避免 Session0 丢失） |
 | `libs/scrap/src/common/codec.rs`、`hwcodec.rs`、`vram.rs` | `HwEncoderParams` 结构 + 参数下发；硬件编码探测超时 30→180s、RAM 路径首帧空产出改报 `ENCODE_PENDING`（见 §6） |
 | `libs/scrap/src/dxgi/mod.rs` | 取帧后复制到私有纹理并立即释放帧，解除 IDD 反压（被控端 60 → ~95fps） |
@@ -362,6 +362,8 @@ upload: .../rustdesk-1.4.9-ios-jailbroken.ipa to s3://***/1.4.9/20260924/ios/arm
 upload: .../rustdesk-1.4.9-ios-unsigned.ipa   to s3://***/1.4.9/20260924/ios/arm64/
 ```
 
+> 上述为 1.4.9 时期的实测记录；1.5.0 起产物路径前缀为 `1.5.0/{DATE}/`，打包逻辑不变。
+
 `codesign -dv --entitlements -` 能读出完整 entitlements（`application-identifier` =
 `com.carriez.flutterHbb` 等 5 项），确认 `ldid -S` 注入生效；两个 ipa 均上传成功。
 
@@ -420,7 +422,7 @@ cd D:/T/OpenCode/github-repos
 | 依赖 | 上游 | 本仓库指向 | 原因 |
 |---|---|---|---|
 | `libs/hbb_common`（子模块） | rustdesk/hbb_common | xxhhlk0/hbb_common | 编译期 `CUSTOM_*` 服务器配置注入 |
-| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `38ea39f`（分支 `custom-1.4.9`） | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth`、`low_power`/`low_delay_brc`）+ 编码参数透传（preset 1-7 / rc / QP / 厂商私有项，VRAM 与 RAM 两通道）+ **手动设置的值优先于内建默认** + **VRAM 硬编路径提速（VideoProcessor 状态缓存 + 耗时拆分日志）** |
+| `hwcodec`（cargo git 依赖） | rustdesk-org/hwcodec | xxhhlk0/hwcodec @ `1db2a694`（分支 `custom-1.4.9`） | 恢复 encoder preset 生效 + constant QP（CQ）码率控制 + 可选画质增强 + qsv 编码吞吐修复（`async_depth`、`low_power`/`low_delay_brc`）+ 编码参数透传（preset 1-7 / rc / QP / 厂商私有项，VRAM 与 RAM 两通道）+ **手动设置的值优先于内建默认** + **VRAM 硬编路径提速（VideoProcessor 状态缓存 + 耗时拆分日志）** + 强制 IDR（`force_keyframe`） |
 
 hwcodec fork 的改动（`cpp/common/util.{h,cpp}`、`cpp/common/platform/win/win.{h,cpp}`、
 `cpp/ffmpeg_ram/ffmpeg_ram_{ffi.h,encode.cpp}`、
