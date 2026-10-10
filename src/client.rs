@@ -108,7 +108,7 @@ pub const MILLI1: Duration = Duration::from_millis(1);
 pub const SEC30: Duration = Duration::from_secs(30);
 // Empirical restart reconnect grace window.
 const RESTART_REMOTE_DEVICE_GRACE: Duration = Duration::from_secs(5 * 60);
-pub const VIDEO_QUEUE_SIZE: usize = 120;
+pub const VIDEO_QUEUE_SIZE: usize = 6;
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
 
 pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
@@ -357,6 +357,16 @@ fn tcp_punch_allowed() -> bool {
 
 impl Client {
     const CLIENT_CLIPBOARD_NAME: &'static str = "client-clipboard";
+
+    /// 远程控制会话（DEFAULT_CONN）建立时不携带 token；其余会话类型保持原样。
+    #[inline]
+    fn session_token<'a>(conn_type: ConnType, token: &'a str) -> &'a str {
+        if conn_type == ConnType::default() {
+            ""
+        } else {
+            token
+        }
+    }
 
     /// Start a new connection.
     pub async fn start(
@@ -810,6 +820,10 @@ impl Client {
         // the outer select_ok closes its pc instead of leaking it in SESSIONS. Disarmed via
         // into_inner() once the stream is adopted into a connection attempt.
         let mut webrtc_offerer = webrtc_offerer.map(OffererGuard::new);
+        // 当且仅当建立远程控制会话（DEFAULT_CONN）时不发送 token。
+        // 其他会话类型（文件传输 / 端口转发 / 摄像头 / 终端）保持原样。
+        // 注意: 置空发生在 secure_tcp 门控之前, 与上游 other_server 分支（token=""）行为一致。
+        let token = Self::session_token(conn_type, &token).to_owned();
         let mut start = Instant::now();
         let mut socket = connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await;
         debug_assert!(!servers.contains(&rendezvous_server));
