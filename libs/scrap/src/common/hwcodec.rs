@@ -1,5 +1,8 @@
 use crate::{
-    codec::{base_bitrate, codec_thread_num, enable_hwcodec_option, EncoderApi, EncoderCfg},
+    codec::{
+        base_bitrate, codec_thread_num, enable_hwcodec_option, soft_decode_threads, EncoderApi,
+        EncoderCfg, HwEncoderParams,
+    },
     convert::*,
     CodecFormat, EncodeInput, ImageFormat, ImageRgb, Pixfmt, HW_STRIDE_ALIGN,
 };
@@ -27,7 +30,8 @@ use hwcodec::{
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
 pub const DEFAULT_FPS: i32 = 30;
-const DEFAULT_GOP: i32 = i32::MAX;
+const GOP_FPS_MULTIPLIER: i32 = 20;
+const DEFAULT_GOP: i32 = DEFAULT_FPS * GOP_FPS_MULTIPLIER;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
 pub const ERR_HEVC_POC: i32 = HwcodecErrno::HWCODEC_ERR_HEVC_COULD_NOT_FIND_POC as i32;
 
@@ -39,6 +43,39 @@ lazy_static::lazy_static! {
     static ref CONFIG_SET_BY_IPC: std::sync::Arc<std::sync::Mutex<bool>> = Default::default();
 }
 
+#[cfg(target_os = "android")]
+static MEDIACODEC_DECODE_FAILED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(target_os = "android")]
+fn mediacodec_decode_bit(name: &str) -> u8 {
+    if name.contains("h264") {
+        1
+    } else if name.contains("hevc") {
+        2
+    } else {
+        0
+    }
+}
+
+/// 编码预设与码率控制枚举映射 (数值语义见 codec.rs HwEncoderParams)
+pub(crate) fn map_quality(v: i32) -> Quality {
+    match v {
+        1..=2 => Quality_Low,
+        3..=5 => Quality_Medium,
+        6..=7 => Quality_High,
+        _ => Quality_Default,
+    }
+}
+
+pub(crate) fn map_rate_control(v: i32) -> RateControl {
+    match v {
+        1 => RC_CBR,
+        2 => RC_VBR,
+        3 => RC_CQ,
+        _ => RC_DEFAULT,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HwRamEncoderConfig {
     pub name: String,
@@ -47,6 +84,7 @@ pub struct HwRamEncoderConfig {
     pub height: usize,
     pub quality: f32,
     pub keyframe_interval: Option<usize>,
+    pub params: Option<HwEncoderParams>,
 }
 
 pub struct HwRamEncoder {
@@ -55,6 +93,8 @@ pub struct HwRamEncoder {
     pub pixfmt: AVPixelFormat,
     bitrate: u32, //kbs
     config: HwRamEncoderConfig,
+    // 连续"已提交帧但无包产出"的计数, 见 encode_to_message 的 ENCODE_PENDING 分支。
+    pending_frames: u32,
 }
 
 impl EncoderApi for HwRamEncoder {
@@ -64,11 +104,25 @@ impl EncoderApi for HwRamEncoder {
     {
         match cfg {
             EncoderCfg::HWRAM(config) => {
-                let rc = Self::rate_control(&config);
-                let mut bitrate =
-                    Self::bitrate(&config.name, config.width, config.height, config.quality);
+                let params = config.params.clone().unwrap_or_default();
+                let rc = match params.rc {
+                    Some(v) => map_rate_control(v),
+                    None => Self::rate_control(&config),
+                };
+                let quality = match params.preset {
+                    Some(v) => map_quality(v),
+                    None => DEFAULT_HW_QUALITY,
+                };
+                let mut bitrate = match params.kbs {
+                    Some(k) => k,
+                    None => Self::bitrate(&config.name, config.width, config.height, config.quality),
+                };
                 bitrate = Self::check_bitrate_range(&config, bitrate);
-                let gop = config.keyframe_interval.unwrap_or(DEFAULT_GOP as _) as i32;
+                let fps = params.fps.unwrap_or(DEFAULT_FPS);
+                let gop = params
+                    .gop
+                    .or_else(|| config.keyframe_interval.map(|interval| interval as i32))
+                    .unwrap_or_else(|| fps.saturating_mul(GOP_FPS_MULTIPLIER));
                 let ctx = EncodeContext {
                     name: config.name.clone(),
                     mc_name: config.mc_name.clone(),
@@ -77,12 +131,20 @@ impl EncoderApi for HwRamEncoder {
                     pixfmt: DEFAULT_PIXFMT,
                     align: HW_STRIDE_ALIGN as _,
                     kbs: bitrate as i32,
-                    fps: DEFAULT_FPS,
+                    fps,
                     gop,
-                    quality: DEFAULT_HW_QUALITY,
+                    quality,
                     rc,
-                    q: -1,
+                    q: params.q.unwrap_or(-1),
+                    spatial_aq: params.spatial_aq.unwrap_or(false),
+                    temporal_aq: params.temporal_aq.unwrap_or(false),
+                    multipass: params.multipass.unwrap_or(0),
+                    preanalysis: params.preanalysis.unwrap_or(false),
                     thread_count: codec_thread_num(16) as _, // ffmpeg's thread_count is used for cpu
+                    // 厂商私有参数 (含 async_depth / low_power / low_delay_brc / cavlc):
+                    // 此前 RAM 通道完全没有透传入口, 导致手动调参被 C 侧内建默认静默盖掉。
+                    // 与 VRAM 通道共用 codec.rs::hw_vendor_opts 一份构造逻辑。
+                    opts: crate::codec::hw_vendor_opts(&params),
                 };
                 let format = match Encoder::format_from_name(config.name.clone()) {
                     Ok(format) => format,
@@ -100,6 +162,7 @@ impl EncoderApi for HwRamEncoder {
                         pixfmt: ctx.pixfmt,
                         bitrate,
                         config,
+                        pending_frames: 0,
                     }),
                     Err(_) => Err(anyhow!(format!("Failed to create encoder"))),
                 }
@@ -109,6 +172,9 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn encode_to_message(&mut self, input: EncodeInput, ms: i64) -> ResultType<VideoFrame> {
+        // 连续无产出帧数上限: 超过它说明编码器真的不干活 (硬件被独占 / 驱动异常),
+        // 而不是异步流水线还没吐出第一个包。30 帧约等于 1 秒 (30fps)。
+        const MAX_PENDING_FRAMES: u32 = 30;
         let mut vf = VideoFrame::new();
         let mut frames = Vec::new();
         for frame in self
@@ -123,6 +189,7 @@ impl EncoderApi for HwRamEncoder {
             });
         }
         if frames.len() > 0 {
+            self.pending_frames = 0;
             let frames = EncodedVideoFrames {
                 frames: frames.into(),
                 ..Default::default()
@@ -134,7 +201,23 @@ impl EncoderApi for HwRamEncoder {
             }
             Ok(vf)
         } else {
-            Err(anyhow!("no valid frame"))
+            // 硬件编码器的异步流水线 (async_depth >= 1) 在启动、关键帧切换后的前几帧
+            // 本就不产出包, 这是正常行为而非编码失败。原来这里报 "no valid frame",
+            // 调用方 (video_service.rs handle_one_frame) 会把它计入失败, 且首帧失败
+            // 对非 latency_free 编码器直接 disable() → 清空 ram_encode → 整机降级为
+            // 软件编码 (AV1)。改为返回 ENCODE_PENDING, 调用方直接跳过 (与 vram 路径
+            // vram.rs 的 ENCODE_PENDING 对齐)。
+            self.pending_frames += 1;
+            if self.pending_frames > MAX_PENDING_FRAMES {
+                log::error!(
+                    "{} produced no frame for {} consecutive frames, switch encoder",
+                    self.config.name,
+                    self.pending_frames
+                );
+                self.pending_frames = 0;
+                bail!(crate::codec::ENCODE_NEED_SWITCH);
+            }
+            bail!(crate::codec::ENCODE_PENDING)
         }
     }
 
@@ -184,6 +267,12 @@ impl EncoderApi for HwRamEncoder {
         }
         self.config.quality = ratio;
         Ok(())
+    }
+
+    fn force_keyframe(&mut self) -> ResultType<()> {
+        self.encoder
+            .set_force_keyframe()
+            .map_err(|_| anyhow!("set_force_keyframe failed"))
     }
 
     fn bitrate(&self) -> u32 {
@@ -310,22 +399,17 @@ pub struct HwRamDecoder {
 }
 
 impl HwRamDecoder {
-    pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
-        let mut info = None;
+    fn soft_info(format: CodecFormat) -> Option<CodecInfo> {
         let soft = CodecInfo::soft();
         match format {
-            CodecFormat::H264 => {
-                if let Some(v) = soft.h264 {
-                    info = Some(v);
-                }
-            }
-            CodecFormat::H265 => {
-                if let Some(v) = soft.h265 {
-                    info = Some(v);
-                }
-            }
-            _ => {}
+            CodecFormat::H264 => soft.h264,
+            CodecFormat::H265 => soft.h265,
+            _ => None,
         }
+    }
+
+    pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
+        let mut info = Self::soft_info(format);
         if enable_hwcodec_option() {
             let best = CodecInfo::prioritized(HwCodecConfig::get().ram_decode);
             match format {
@@ -351,24 +435,138 @@ impl HwRamDecoder {
         let Some(info) = info else {
             bail!("unsupported format: {:?}", format);
         };
-        let ctx = DecodeContext {
-            name: info.name.clone(),
-            device_type: info.hwdevice.clone(),
-            thread_count: codec_thread_num(16) as _,
-        };
-        match Decoder::new(ctx) {
+        match Self::create(&info) {
             Ok(decoder) => Ok(HwRamDecoder { decoder, info }),
             Err(_) => {
+                log::error!("create {} ram decoder failed", info.name);
+                #[cfg(target_os = "android")]
+                {
+                    if info.name.contains("mediacodec") {
+                        MEDIACODEC_DECODE_FAILED.fetch_or(
+                            mediacodec_decode_bit(&info.name),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        if let Some(soft) = Self::soft_info(format) {
+                            if let Ok(decoder) = Self::create(&soft) {
+                                return Ok(HwRamDecoder { decoder, info: soft });
+                            }
+                        }
+                    }
+                }
                 HwCodecConfig::clear(false, false);
                 Err(anyhow!(format!("Failed to create decoder")))
             }
         }
     }
-    pub fn decode<'a>(&'a mut self, data: &[u8]) -> ResultType<Vec<HwRamDecoderImage<'a>>> {
-        match self.decoder.decode(data) {
-            Ok(v) => Ok(v.iter().map(|f| HwRamDecoderImage { frame: f }).collect()),
-            Err(e) => Err(anyhow!(e)),
+
+    /// 软解 (libx264/libx265): priority=Soft (见 hwcodec `CodecInfo::soft()`)。
+    /// 名字再挡一道 mediacodec/videotoolbox —— 它们的 hwdevice 也是 NONE
+    /// (ffmpeg 的 mediacodec wrapper 不走 hwcontext), 但它们是硬解, 线程由
+    /// 框架自管, 不能按软解对待。
+    fn is_soft(info: &CodecInfo) -> bool {
+        info.priority == hwcodec::ffmpeg_ram::Priority::Soft as i32
+            && !info.name.contains("mediacodec")
+            && !info.name.contains("videotoolbox")
+    }
+
+    fn create(info: &CodecInfo) -> Result<Decoder, ()> {
+        Decoder::new(DecodeContext {
+            name: info.name.clone(),
+            device_type: info.hwdevice.clone(),
+            // 软解: 物理核心数, 不做动态/内存钳制 (见 soft_decode_threads)。
+            // 硬解: D3D11VA 由 hwcodec C 侧强制 thread_count=1 (GPU 异步,
+            // ffmpeg 线程只提交包/取帧); mediacodec 的 thread_count 被
+            // ffmpeg wrapper 忽略 (线程由 Android MediaCodec 框架自管)。
+            thread_count: if Self::is_soft(info) {
+                soft_decode_threads()
+            } else {
+                1
+            },
+        })
+    }
+
+    #[cfg(target_os = "android")]
+    fn soft_info_of(format: DataFormat) -> Option<CodecInfo> {
+        let soft = CodecInfo::soft();
+        match format {
+            DataFormat::H264 => soft.h264,
+            DataFormat::H265 => soft.h265,
+            _ => None,
         }
+    }
+
+    /// mediacodec 解码失败时就地换成软解并重放当前包。
+    ///
+    /// 必须在这里兜住: mediacodec 走延迟 open (extradata 只能从码流首包取, 见
+    /// hwcodec cpp/common/annexb.h), 所以创建成功不代表本机真能出帧。失败若冒到
+    /// client.rs, 首帧失败会把整个 H264 标为不支持并上报服务端
+    /// (src/client.rs:2983), 影响面远大于回退软解。
+    ///
+    /// 只在软解能独立解出这一包时才换 —— 那说明该包是 IDR, 软解已被正确初始化。
+    #[cfg(target_os = "android")]
+    fn fallback_to_soft(&mut self, data: &[u8]) -> bool {
+        if !self.info.name.contains("mediacodec") {
+            return false;
+        }
+        let Some(soft) = Self::soft_info_of(self.info.format) else {
+            return false;
+        };
+        let Ok(mut decoder) = Self::create(&soft) else {
+            return false;
+        };
+        if decoder.decode(data).is_err() {
+            return false;
+        }
+        MEDIACODEC_DECODE_FAILED.fetch_or(
+            mediacodec_decode_bit(&self.info.name),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        log::warn!(
+            "{} decode failed, fallback to {}",
+            self.info.name,
+            soft.name
+        );
+        self.decoder = decoder;
+        self.info = soft;
+        true
+    }
+
+    pub fn decode<'a>(&'a mut self, data: &[u8]) -> ResultType<Vec<HwRamDecoderImage<'a>>> {
+        // 先把 Result 收敛成 Option<i32>, 否则 if let 的临时值会把 self 的可变
+        // 借用带到分支体里, 与下面的 fallback_to_soft(&mut self) 冲突。
+        let err = match self.decoder.decode(data) {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        };
+        if let Some(e) = err {
+            #[cfg(target_os = "android")]
+            {
+                if self.fallback_to_soft(data) {
+                    // 已换成软解并重放过当前包, 走下面的 frames() 取帧
+                } else {
+                    // 软解也解不出当前包 —— 多数是当前包非 IDR, 软解需要关键帧
+                    // 才能起。这不等于码流损坏, 返回 Ok(空) 让上层继续等下一个包
+                    // (下次 decode 仍会重试 fallback, 直到碰到 IDR)。否则 client.rs
+                    // 的 fail_counter 会在 3 次连续 Err 后把 H264 标为不支持, 服务端
+                    // 退到 AV1 软编 —— 比多等几个包糟糕得多。
+                    log::warn!(
+                        "{}, fallback to soft pending (wait for key frame)",
+                        e.to_string()
+                    );
+                    return Ok(vec![]);
+                }
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                return Err(anyhow!(e));
+            }
+        }
+        Ok(self
+            .decoder
+            .frames()
+            .iter()
+            .map(|f| HwRamDecoderImage { frame: f })
+            .collect())
     }
 }
 
@@ -594,8 +792,23 @@ impl HwCodecConfig {
                 });
             }
             log::debug!("e: {e:?}");
+            let failed = MEDIACODEC_DECODE_FAILED.load(std::sync::atomic::Ordering::SeqCst);
+            let mut d: Vec<CodecInfo> = vec![];
+            ts.iter().for_each(|t| {
+                if (failed & mediacodec_decode_bit(t.name_prefix)) == 0 {
+                    d.push(CodecInfo {
+                        name: format!("{}_mediacodec", t.name_prefix),
+                        mc_name: None,
+                        format: t.data_format,
+                        hwdevice: hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE,
+                        priority: hwcodec::ffmpeg_ram::Priority::Best as _,
+                    });
+                }
+            });
+            log::debug!("d: {d:?}");
             HwCodecConfig {
                 ram_encode: e,
+                ram_decode: d,
                 ..Default::default()
             }
         }
@@ -693,7 +906,13 @@ pub fn check_available_hwcodec() -> String {
         quality: DEFAULT_HW_QUALITY,
         rc: RC_CBR,
         q: -1,
+        spatial_aq: false,
+        temporal_aq: false,
+        multipass: 0,
+        preanalysis: false,
         thread_count: 4,
+        // 能力探测阶段不带任何 profile 参数 (用编码器默认能力判定可用性)
+        opts: String::new(),
     };
     #[cfg(feature = "vram")]
     let vram = crate::vram::check_available_vram();
@@ -719,23 +938,35 @@ pub fn start_check_process() {
     if !enable_hwcodec_option() || HwCodecConfig::already_set() {
         return;
     }
-    use hbb_common::allow_err;
     use std::sync::Once;
     let f = || {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(_) = exe.file_name().to_owned() {
                 let arg = "--check-hwcodec-config";
-                if let Ok(mut child) = std::process::Command::new(exe).arg(arg).spawn() {
+                let mut cmd = std::process::Command::new(exe);
+                cmd.arg(arg).env("HWCODEC_ASYNC_DEPTH", "1");
+                if let Ok(mut child) = cmd.spawn() {
                     #[cfg(windows)]
                     hwcodec::common::child_exit_when_parent_exit(child.id());
-                    // wait up to 30 seconds, it maybe slow on windows startup for poorly performing machines
-                    for _ in 0..30 {
+                    // 等待探测结束。冷启动的机器上可能要 1-2 分钟: 装了多个显示适配器
+                    // (尤其是虚拟显示驱动) 时, 每个适配器都要实建一次编码器, vram/ram 的
+                    // 编解码再全测一遍。原来只等 30 秒且超时即 kill 子进程 —— 子进程被杀
+                    // 之后探测结果永远送不到 server, server 只能沿用旧缓存, 而缓存里的
+                    // vram_encode.luid 会随重启失效 → vram 编码不可用 → 回退 RAM 路径 →
+                    // 再被首帧空产出打回软件编码。
+                    // 这里放宽到 180 秒, 且超时后不再强杀 (子进程已加入 job object, 父进程
+                    // 退出时会一并回收), 由下面的 wait() 兜底, 保证结果送达。
+                    for _ in 0..180 {
                         std::thread::sleep(std::time::Duration::from_secs(1));
                         if let Ok(Some(_)) = child.try_wait() {
                             break;
                         }
                     }
-                    allow_err!(child.kill());
+                    if child.try_wait().ok().flatten().is_none() {
+                        log::warn!(
+                            "Check hwcodec config still running after 180s, keep waiting for its result"
+                        );
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(30));
                     match child.try_wait() {
                         Ok(Some(status)) => {

@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    codec::{enable_vram_option, EncoderApi, EncoderCfg},
+    codec::{enable_vram_option, EncoderApi, EncoderCfg, HwEncoderParams},
     hwcodec::HwCodecConfig,
     AdapterDevice, CodecFormat, EncodeInput, EncodeYuvFormat, Pixfmt,
 };
@@ -41,6 +41,9 @@ pub struct VRamEncoderConfig {
     pub quality: f32,
     pub feature: FeatureContext,
     pub keyframe_interval: Option<usize>,
+    /// 编码 profile 透传: kbs / fps / gop 之外, preset / rc / q / 画质增强
+    /// 也会经 DynamicContext 传到 hwcodec C 库 (需 hwcodec >= 参数透传版本)。
+    pub params: Option<HwEncoderParams>,
 }
 
 pub struct VRamEncoder {
@@ -59,13 +62,42 @@ impl EncoderApi for VRamEncoder {
     {
         match cfg {
             EncoderCfg::VRAM(config) => {
-                let bitrate = Self::bitrate(
-                    config.feature.data_format,
-                    config.width,
-                    config.height,
-                    config.quality,
-                );
-                let gop = config.keyframe_interval.unwrap_or(MAX_GOP as _) as i32;
+                let params = config.params.clone().unwrap_or_default();
+                let bitrate = match params.kbs {
+                    Some(k) => k,
+                    None => Self::bitrate(
+                        config.feature.data_format,
+                        config.width,
+                        config.height,
+                        config.quality,
+                    ),
+                };
+                let framerate = params.fps.unwrap_or(30);
+                let gop = params
+                    .gop
+                    .or_else(|| config.keyframe_interval.map(|interval| interval as i32))
+                    .unwrap_or_else(|| framerate.saturating_mul(20));
+                // 透传编码 profile: preset / rc / QP / 画质增强 (C 侧 RC_DEFAULT 回退 CBR, q=-1 不设置)
+                #[cfg(feature = "hwcodec")]
+                let quality = super::hwcodec::map_quality(params.preset.unwrap_or(0)) as i32;
+                #[cfg(not(feature = "hwcodec"))]
+                let quality = params.preset.unwrap_or(0);
+                #[cfg(feature = "hwcodec")]
+                let rc = super::hwcodec::map_rate_control(match params.rc {
+                    // 无 profile 时保持旧行为: CBR
+                    Some(v) => v,
+                    None => 1,
+                }) as i32;
+                #[cfg(not(feature = "hwcodec"))]
+                let rc = match params.rc {
+                    // 无 profile 时保持旧行为: CBR
+                    Some(v) => v,
+                    None => 1,
+                };
+                // 厂商私有参数串, 键名与 hwcodec C 侧 opts 一致; 各厂商只读取自己认识的 key,
+                // 因此三家的参数可以一起下发 (未配置的 key 不下发, 保持编码器默认)。
+                // 与 HWRAM 通道共用同一份构造逻辑 (codec.rs::hw_vendor_opts)。
+                let opts = crate::codec::hw_vendor_opts(&params);
                 let ctx = EncodeContext {
                     f: config.feature.clone(),
                     d: DynamicContext {
@@ -73,8 +105,16 @@ impl EncoderApi for VRamEncoder {
                         width: config.width as _,
                         height: config.height as _,
                         kbitrate: bitrate as _,
-                        framerate: 30,
+                        framerate,
                         gop,
+                        quality,
+                        rc,
+                        q: params.q.unwrap_or(-1),
+                        spatial_aq: params.spatial_aq.unwrap_or(false),
+                        temporal_aq: params.temporal_aq.unwrap_or(false),
+                        multipass: params.multipass.unwrap_or(0),
+                        preanalysis: params.preanalysis.unwrap_or(false),
+                        opts,
                     },
                 };
                 match Encoder::new(ctx.clone()) {
@@ -151,7 +191,9 @@ impl EncoderApi for VRamEncoder {
             }
             Ok(vf)
         } else {
-            Err(anyhow!("no valid frame"))
+            // vram 异步编码流水线: 帧已提交, 包尚未产出, 由下一帧调用收取。
+            // 调用方 (handle_one_frame) 对该错误不计入编码失败。
+            bail!(crate::codec::ENCODE_PENDING)
         }
     }
 
@@ -185,6 +227,12 @@ impl EncoderApi for VRamEncoder {
             }
         }
         Ok(())
+    }
+
+    fn force_keyframe(&mut self) -> ResultType<()> {
+        self.encoder
+            .set_force_keyframe()
+            .map_err(|_| anyhow!("set_force_keyframe failed"))
     }
 
     fn bitrate(&self) -> u32 {
@@ -391,6 +439,7 @@ pub(crate) fn check_available_vram() -> (Vec<FeatureContext>, Vec<DecodeContext>
         kbitrate: 5000,
         framerate: 60,
         gop: MAX_GOP as _,
+        ..Default::default()
     };
     let encoders = encode::available(d);
     let decoders = decode::available();
