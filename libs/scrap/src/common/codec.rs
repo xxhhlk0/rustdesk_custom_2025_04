@@ -148,6 +148,10 @@ pub trait EncoderApi {
 
     fn set_quality(&mut self, ratio: f32) -> ResultType<()>;
 
+    /// 强制下一帧编码为 IDR (客户端丢帧后请求同步用)。
+    /// 返回 Err 表示该编码器不支持, 上层应退回"重启编码器"的旧行为。
+    fn force_keyframe(&mut self) -> ResultType<()>;
+
     fn bitrate(&self) -> u32;
 
     fn support_changing_quality(&self) -> bool;

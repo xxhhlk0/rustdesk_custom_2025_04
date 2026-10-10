@@ -269,6 +269,12 @@ impl EncoderApi for HwRamEncoder {
         Ok(())
     }
 
+    fn force_keyframe(&mut self) -> ResultType<()> {
+        self.encoder
+            .set_force_keyframe()
+            .map_err(|_| anyhow!("set_force_keyframe failed"))
+    }
+
     fn bitrate(&self) -> u32 {
         self.bitrate
     }

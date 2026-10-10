@@ -39,6 +39,8 @@ pub struct VpxEncoder {
     id: VpxVideoCodecId,
     i444: bool,
     yuvfmt: EncodeYuvFormat,
+    /// 强制下一帧为 IDR (客户端丢帧后请求同步用, 一帧后自动清除)
+    force_keyframe_: bool,
 }
 
 pub struct VpxDecoder {
@@ -165,6 +167,7 @@ impl EncoderApi for VpxEncoder {
                     id: config.codec,
                     i444,
                     yuvfmt: Self::get_yuvfmt(config.width, config.height, i444),
+                    force_keyframe_: false,
                 })
             }
             _ => Err(anyhow!("encoder type mismatch")),
@@ -210,6 +213,11 @@ impl EncoderApi for VpxEncoder {
         Ok(())
     }
 
+    fn force_keyframe(&mut self) -> ResultType<()> {
+        self.force_keyframe_ = true;
+        Ok(())
+    }
+
     fn bitrate(&self) -> u32 {
         let c = unsafe { *self.ctx.config.enc.to_owned() };
         c.rc_target_bitrate
@@ -252,12 +260,18 @@ impl VpxEncoder {
             data.as_ptr() as _,
         ));
 
+        let flags = if self.force_keyframe_ {
+            self.force_keyframe_ = false;
+            VPX_EFLAG_FORCE_KF as _
+        } else {
+            0
+        };
         call_vpx!(vpx_codec_encode(
             &mut self.ctx,
             &image,
             pts as _,
             1, // Duration
-            0, // Flags
+            flags,
             VPX_DL_REALTIME as _,
         ));
 

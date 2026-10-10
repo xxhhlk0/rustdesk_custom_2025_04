@@ -725,11 +725,24 @@ fn run(vs: VideoService) -> ResultType<()> {
             &sp.name(),
         )?;
         if sp.is_option_true(OPTION_REFRESH) {
+            // 先消费掉选项 (一次性), 否则每帧都会进来
+            sp.set_option_bool(OPTION_REFRESH, false);
             if vs.source.is_monitor() {
+                // 显示真变了 (分辨率/位置) → try_broadcast_display_changed
+                // 内部检测到变化会 bail!("SWITCH") 走完整重建
                 let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
             }
-            log::info!("switch to refresh");
-            bail!("SWITCH");
+            // 显示没变 = 客户端丢帧后请求同步 / 手动刷新 → 只强制 IDR。
+            // 旧逻辑无条件 bail!("SWITCH") 重启整个 video service, 会导致
+            // fps=0 的帧空洞 (stop + new service + 重建编码器), 手机端帧积压
+            // 触发 reduce delay 时尤其严重 (每 1.4 秒崩一次)。
+            if encoder.force_keyframe().is_ok() {
+                log::info!("force keyframe (OPTION_REFRESH, no display change)");
+            } else {
+                // 编码器不支持强制 IDR → 退回旧行为
+                log::info!("switch to refresh (force_keyframe unsupported)");
+                bail!("SWITCH");
+            }
         }
         if codec_format != Encoder::negotiated_codec() {
             log::info!(
