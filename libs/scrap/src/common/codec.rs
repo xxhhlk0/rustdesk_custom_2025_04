@@ -18,6 +18,10 @@ use crate::{
     CodecFormat, EncodeInput, EncodeYuvFormat, ImageRgb, ImageTexture,
 };
 
+use base::message_proto::{
+    supported_decoding::PreferCodec, video_frame, Chroma, CodecAbility, EncodedVideoFrames,
+    SupportedDecoding, SupportedEncoding, VideoFrame,
+};
 #[cfg(any(
     feature = "hwcodec",
     feature = "mediacodec",
@@ -30,10 +34,6 @@ use hbb_common::{
     bail,
     config::{Config, PeerConfig},
     lazy_static, log,
-    message_proto::{
-        supported_decoding::PreferCodec, video_frame, Chroma, CodecAbility, EncodedVideoFrames,
-        SupportedDecoding, SupportedEncoding, VideoFrame,
-    },
     sysinfo::System,
     ResultType,
 };
@@ -46,9 +46,6 @@ lazy_static::lazy_static! {
 }
 
 pub const ENCODE_NEED_SWITCH: &'static str = "ENCODE_NEED_SWITCH";
-// vram 异步编码流水线: 本帧已提交但包尚未产出 (hwcodec AsyncDepth>1)。
-// 不是编码错误, 调用方不应计入失败次数。
-pub const ENCODE_PENDING: &'static str = "ENCODE_PENDING";
 
 #[derive(Debug, Clone)]
 pub enum EncoderCfg {
@@ -58,80 +55,6 @@ pub enum EncoderCfg {
     HWRAM(HwRamEncoderConfig),
     #[cfg(feature = "vram")]
     VRAM(VRamEncoderConfig),
-}
-
-/// 用户可选的硬件编码参数 (来自编码 profile, 详见 rustdesk 侧 hw_encode_profile 模块)。
-/// 数值语义与 hwcodec 的 Quality / RateControl 枚举一一对应:
-/// - preset: 1-7, 越大越慢画质越好 (1 = nvenc p1 / qsv veryfast / amf speed,
-///           7 = nvenc p7 / qsv veryslow / amf quality);
-///           None = 编码器默认 preset
-/// - rc:     0=DEFAULT 1=CBR 2=VBR 3=CQ / 恒定 QP (配合 q;
-///           nvenc rc=constqp+qp, amf rc=cqp+qp_i|p|b, qsv ICQ, mediacodec bitrate_mode=cq)
-/// - kbs:    None = 按 base_bitrate×ratio 自动推导; rc=CQ 时被忽略
-/// - fps/gop/q: None = 沿用内置默认 (30 / fps×20 / -1; 录制时优先使用 keyframe_interval)
-/// - 画质增强 (编码器内建能力, 不额外占用 CPU; None = 不设置, 保持编码器默认):
-///   spatial_aq/temporal_aq/multipass 仅 nvenc, preanalysis 仅 amf;
-///   multipass: 1 = two pass quarter res, 2 = two pass full res。
-///   注: temporal AQ 在部分 GPU 上不受支持, hwcodec 会在编码器初始化失败时
-///   自动去掉增强项重试一次。
-/// - vendor: 厂商私有参数, 键名即 hwcodec C 侧 opts 的 key (tuning/cavlc/usage/...),
-///   各厂商只读取自己认识的 key, 因此三家可以一起下发。
-/// 注意: VRAM 通道历史上仅支持 kbs/fps/gop; 自本 hwcodec fork 起
-/// preset/rc/q/画质增强/厂商私有参数 也会透传到 C 侧 (DynamicContext)。
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct HwEncoderParams {
-    pub preset: Option<i32>,
-    pub rc: Option<i32>,
-    pub kbs: Option<u32>,
-    pub q: Option<i32>,
-    pub fps: Option<i32>,
-    pub gop: Option<i32>,
-    pub spatial_aq: Option<bool>,
-    pub temporal_aq: Option<bool>,
-    pub multipass: Option<i32>,
-    pub preanalysis: Option<bool>,
-    pub vendor: Vec<(String, i32)>,
-}
-
-/// 把编码 profile 的"画质增强项 + 厂商私有参数"拼成 hwcodec C 侧认识的
-/// `key=value;key=value` 串。键名与 C 侧 opts 的 key 一致 (见 HwEncoderParams 文档),
-/// 各厂商只读取自己认识的 key, 因此三家的参数可以一起下发; 未配置的 key 不下发,
-/// 保持编码器默认。RAM 与 VRAM 两个通道共用这一份构造逻辑, 避免两边口径漂移。
-///
-/// 注意: 该串只是"请求值", 最终是否生效由 C 侧决定 —— C 侧在内建默认
-/// (async_depth=1 / low_power=1 等) 之后应用它, 即手动设置的值优先。
-pub fn hw_vendor_opts(params: &HwEncoderParams) -> String {
-    let mut vendor_opts = Vec::<(String, String)>::new();
-    let mut push = |k: &str, v: i32| vendor_opts.push((k.to_owned(), v.to_string()));
-    if let Some(v) = params.preset {
-        push("preset", v);
-    }
-    if let Some(v) = params.rc {
-        push("rc", v);
-    }
-    if let Some(v) = params.q {
-        push("q", v);
-    }
-    if let Some(v) = params.spatial_aq {
-        push("spatial_aq", v as i32);
-    }
-    if let Some(v) = params.temporal_aq {
-        push("temporal_aq", v as i32);
-    }
-    if let Some(v) = params.multipass {
-        push("multipass", v);
-    }
-    if let Some(v) = params.preanalysis {
-        push("preanalysis", v as i32);
-    }
-    for (k, v) in params.vendor.iter() {
-        push(k, *v);
-    }
-    vendor_opts
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(";")
 }
 
 pub trait EncoderApi {
@@ -147,10 +70,6 @@ pub trait EncoderApi {
     fn input_texture(&self) -> bool;
 
     fn set_quality(&mut self, ratio: f32) -> ResultType<()>;
-
-    /// 强制下一帧编码为 IDR (客户端丢帧后请求同步用)。
-    /// 返回 Err 表示该编码器不支持, 上层应退回"重启编码器"的旧行为。
-    fn force_keyframe(&mut self) -> ResultType<()>;
 
     fn bitrate(&self) -> u32;
 
@@ -350,7 +269,7 @@ impl Encoder {
         let preference = most_frequent.enum_value_or(PreferCodec::Auto);
 
         // auto: h265 > h264 > av1/vp9/vp8
-        let av1_test = Config::get_option(hbb_common::config::keys::OPTION_AV1_TEST) != "N";
+        let av1_test = Config::get_option(base::config::keys::OPTION_AV1_TEST) != "N";
         let mut auto_codec = if av1_useable && av1_test {
             CodecFormat::AV1
         } else {
@@ -625,14 +544,6 @@ impl Decoder {
                     }
                     valid = h264_vram.is_some();
                 }
-                #[cfg(feature = "mediacodec")]
-                if !valid && enable_hwcodec_option() {
-                    h264_media_codec = MediaCodecDecoder::new(format);
-                    if h264_media_codec.is_none() {
-                        log::error!("create H264 media codec decoder failed");
-                    }
-                    valid = h264_media_codec.is_some();
-                }
                 #[cfg(feature = "hwcodec")]
                 if !valid {
                     match HwRamDecoder::new(format) {
@@ -640,6 +551,14 @@ impl Decoder {
                         Err(e) => log::error!("create H264 ram decoder failed: {}", e),
                     }
                     valid = h264_ram.is_some();
+                }
+                #[cfg(feature = "mediacodec")]
+                if !valid && enable_hwcodec_option() {
+                    h264_media_codec = MediaCodecDecoder::new(format);
+                    if h264_media_codec.is_none() {
+                        log::error!("create H264 media codec decoder failed");
+                    }
+                    valid = h264_media_codec.is_some();
                 }
             }
             CodecFormat::H265 => {
@@ -651,14 +570,6 @@ impl Decoder {
                     }
                     valid = h265_vram.is_some();
                 }
-                #[cfg(feature = "mediacodec")]
-                if !valid && enable_hwcodec_option() {
-                    h265_media_codec = MediaCodecDecoder::new(format);
-                    if h265_media_codec.is_none() {
-                        log::error!("create H265 media codec decoder failed");
-                    }
-                    valid = h265_media_codec.is_some();
-                }
                 #[cfg(feature = "hwcodec")]
                 if !valid {
                     match HwRamDecoder::new(format) {
@@ -666,6 +577,14 @@ impl Decoder {
                         Err(e) => log::error!("create H265 ram decoder failed: {}", e),
                     }
                     valid = h265_ram.is_some();
+                }
+                #[cfg(feature = "mediacodec")]
+                if !valid && enable_hwcodec_option() {
+                    h265_media_codec = MediaCodecDecoder::new(format);
+                    if h265_media_codec.is_none() {
+                        log::error!("create H265 media codec decoder failed");
+                    }
+                    valid = h265_media_codec.is_some();
                 }
             }
             CodecFormat::Unknown => {
@@ -851,24 +770,16 @@ impl Decoder {
         rgb: &mut ImageRgb,
         i420: &mut Vec<u8>,
     ) -> ResultType<bool> {
-        let mut converted = false;
-        let mut got_image = false;
+        let mut ret = false;
         for h264 in frames.frames.iter() {
             for image in decoder.decode(&h264.data)? {
                 // TODO: just process the last frame
-                got_image = true;
                 if image.to_fmt(rgb, i420).is_ok() {
-                    converted = true;
+                    ret = true;
                 }
             }
         }
-        // 无帧 ≠ 失败: 硬解是异步流水线, 输入缓冲填满前 receive 恒 EAGAIN,
-        // 首帧往往要等好几个包 (hwcodec do_decode 已把 EAGAIN 当"暂无输出")。
-        // 返回 Ok(true) 表示"本批包处理成功", 含"暂无输出"; 真失败由 decode() 的
-        // Err 体现。否则 client.rs 的首帧判定会把 fail_counter 直接跳到 MAX 并把
-        // H264 标为不支持, 服务端随之退到 AV1 软编 (实测 3840x2400 超手机硬解上限
-        // 4096x2176 时就是这条路径)。
-        Ok(!got_image || converted)
+        return Ok(ret);
     }
 
     #[cfg(feature = "vram")]
@@ -938,7 +849,7 @@ impl Decoder {
 
 #[cfg(any(feature = "hwcodec", feature = "mediacodec"))]
 pub fn enable_hwcodec_option() -> bool {
-    use hbb_common::config::keys::OPTION_ENABLE_HWCODEC;
+    use base::config::keys::OPTION_ENABLE_HWCODEC;
 
     if !cfg!(target_os = "ios") {
         return option2bool(
@@ -950,7 +861,7 @@ pub fn enable_hwcodec_option() -> bool {
 }
 #[cfg(feature = "vram")]
 pub fn enable_vram_option(encode: bool) -> bool {
-    use hbb_common::config::keys::OPTION_ENABLE_HWCODEC;
+    use base::config::keys::OPTION_ENABLE_HWCODEC;
 
     if cfg!(windows) {
         let enable = option2bool(
@@ -969,13 +880,13 @@ pub fn enable_vram_option(encode: bool) -> bool {
 
 #[cfg(windows)]
 pub fn enable_directx_capture() -> bool {
-    use hbb_common::config::keys::OPTION_ENABLE_DIRECTX_CAPTURE as OPTION;
+    use base::config::keys::OPTION_ENABLE_DIRECTX_CAPTURE as OPTION;
     option2bool(OPTION, &Config::get_option(OPTION))
 }
 
 #[cfg(windows)]
 pub fn allow_d3d_render() -> bool {
-    use hbb_common::config::keys::OPTION_ALLOW_D3D_RENDER as OPTION;
+    use base::config::keys::OPTION_ALLOW_D3D_RENDER as OPTION;
     option2bool(OPTION, &hbb_common::config::LocalConfig::get_option(OPTION))
 }
 
@@ -1069,7 +980,7 @@ pub fn codec_thread_num(limit: usize) -> usize {
     #[cfg(windows)]
     {
         res = 0;
-        let percent = hbb_common::platform::windows::cpu_uage_one_minute();
+        let percent = base::platform::windows::cpu_uage_one_minute();
         info = format!("cpu usage: {:?}", percent);
         if let Some(pecent) = percent {
             if pecent < 100.0 {
@@ -1119,19 +1030,6 @@ pub fn codec_thread_num(limit: usize) -> usize {
     res
 }
 
-/// 软解 (libx264/libx265) 的切片线程数 = CPU 物理核心数 (不含超线程)。
-///
-/// 与 `codec_thread_num` 的区别: 那个函数的 `min(可用内存/2)` 是给 libaom/vpx
-/// **编码**设计的 (参考帧 + 率控缓冲), 解码沿用会把 8 核手机钳到 1 线程
-/// (实测 available memory 3G -> memory/2 = 1), 4K 软解只有 10~20fps。
-/// 解码的切片线程共享帧缓冲, 每线程开销仅 MB 级, 不需要内存钳制。
-///
-/// 取物理核而非逻辑核: 超线程对解码收益极小 (解码是计算密集 + cache 敏感),
-/// 两个逻辑核抢 cache 反而可能让单帧延迟上升。
-pub fn soft_decode_threads() -> i32 {
-    num_cpus::get_physical().max(1) as _
-}
-
 fn disable_av1() -> bool {
     // aom is very slow for x86 sciter version on windows x64
     // disable it for all 32 bit platforms
@@ -1140,7 +1038,7 @@ fn disable_av1() -> bool {
 
 #[cfg(not(target_os = "ios"))]
 pub fn test_av1() {
-    use hbb_common::config::keys::OPTION_AV1_TEST;
+    use base::config::keys::OPTION_AV1_TEST;
     use hbb_common::rand::Rng;
     use std::{sync::Once, time::Duration};
 

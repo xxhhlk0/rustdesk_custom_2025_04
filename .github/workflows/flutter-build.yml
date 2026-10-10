@@ -3,11 +3,12 @@ name: Build the flutter version of the RustDesk
 on:
   workflow_call:
     inputs:
-      build-ios:
-        description: "构建 iOS 未签名 ipa (TrollStore / 越狱设备 / AltStore 可用)"
-        required: false
+      upload-artifact:
         type: boolean
-        default: false
+        default: true
+      upload-tag:
+        type: string
+        default: "nightly"
 
 # NOTE: F-Droid builder script 'flutter/build_fdroid.sh' reads environment
 # variables from this workflow!
@@ -30,43 +31,62 @@ env:
   # engine is 3.44. Every other platform stays on FLUTTER_VERSION (3.24.5) until Windows 7
   # support is restored after the upstream-wide Flutter bump. The arm64 job patches the few
   # 3.44-only source/pubspec changes on the fly (see "Patch RustDesk sources for Flutter 3.44").
-  FLUTTER_WINDOWS_ARM_VERSION: "3.44.0"
+  FLUTTER_WINDOWS_ARM_VERSION: "3.44.9"
   # for arm64 linux because official Dart SDK does not work
   FLUTTER_ELINUX_VERSION: "3.16.9"
+  TAG_NAME: "${{ inputs.upload-tag }}"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-  # vcpkg version: 2025.08.27
+  # vcpkg version: 2026.07.29
   # If we change the `VCPKG COMMIT_ID`, please remember:
   # 1. Call `$VCPKG_ROOT/vcpkg x-update-baseline` to update the baseline in `vcpkg.json`.
-  #  Or we may face build issue like
+  #  Or we may face build issue like 
   #  https://github.com/rustdesk/rustdesk/actions/runs/14414119794/job/40427970174
   # 2. Update the `VCPKG_COMMIT_ID` in `ci.yml` and `playground.yml`.
-  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VCPKG_CMAKE_VERSION: "4.3.0"
   ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836" # 2025.01.13, got "/opt/artifacts/vcpkg/vcpkg: No such file or directory" with latest version
-  VERSION: "1.4.9"
+  VERSION: "1.5.0"
   NDK_VERSION: "r28c"
-  # AWS CLI retry configuration for R2 operations
-  AWS_MAX_ATTEMPTS: "5"
-  AWS_RETRY_MODE: "standard"
   #signing keys env variable checks
   ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
+  UPLOAD_ARTIFACT: "${{ inputs.upload-artifact }}"
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}-2"
-  # Custom server configuration (embedded at build time)
-  CUSTOM_RENDEZVOUS_SERVER: "${{ secrets.CUSTOM_RENDEZVOUS_SERVER }}"
-  CUSTOM_RS_PUB_KEY: "${{ secrets.CUSTOM_RS_PUB_KEY }}"
-  CUSTOM_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_RENDEZVOUS_PORT }}"
-  CUSTOM_RELAY_PORT: "${{ secrets.CUSTOM_RELAY_PORT }}"
-  CUSTOM_WS_RENDEZVOUS_PORT: "${{ secrets.CUSTOM_WS_RENDEZVOUS_PORT }}"
-  CUSTOM_WS_RELAY_PORT: "${{ secrets.CUSTOM_WS_RELAY_PORT }}"
 
 jobs:
+  generate-sbom:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM
+        run: |
+          syft dir:. \
+            -o cyclonedx-json=rustdesk.sbom.json
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        if: env.UPLOAD_ARTIFACT == 'true'
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            rustdesk.sbom.json
+
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
-    secrets: inherit
 
   build-RustDeskTempTopMostWindow:
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
-    secrets: inherit
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +100,7 @@ jobs:
               platform: ARM64,
             }
     with:
+      upload-artifact: ${{ inputs.upload-artifact }}
       target: ${{ matrix.job.target }}
       configuration: Release
       platform: ${{ matrix.job.platform }}
@@ -126,30 +147,14 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Redirect googlesource fetches to GitHub mirrors
-        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
-        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
-        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
-        shell: bash
-        run: |
-          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-          git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
-
-      - name: Restore bridge files from R2
-        shell: bash
-        run: |
-          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/${{ matrix.job.arch == 'aarch64' && 'bridge-artifact-flutter-3.44' || 'bridge-artifact' }}/ ./src/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          mv ./src/generated_bridge.dart ./flutter/lib/
-          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
-          mv ./src/bridge_generated.h ./flutter/macos/Runner/
-          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          # arm64 is on Flutter 3.44, so it needs the bridge generated with the same Flutter
+          # (its *.freezed.dart must match the freezed the arm64 build resolves). x64 and every
+          # other platform keep the default 3.22.3-generated bridge.
+          name: ${{ matrix.job.arch == 'aarch64' && 'bridge-artifact-flutter-3.44' || 'bridge-artifact' }}
+          path: ./
 
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
@@ -208,14 +213,7 @@ jobs:
         run: |
           flutter doctor -v
           flutter precache --windows
-          $engineZipTmp = Join-Path $PWD ([System.IO.Path]::GetRandomFileName() + ".zip")
-          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile $engineZipTmp
-          Move-Item -Force $engineZipTmp windows-x64-release.zip
-
-      - name: Install custom flutter engine
-        # x64 only: see "Replace engine with rustdesk custom flutter engine" above.
-        if: ${{ matrix.job.arch == 'x86_64' }}
-        run: |
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
           Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
           mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
 
@@ -227,7 +225,9 @@ jobs:
         run: |
           cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
           cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]] && git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]]; then
+            git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
 
       - name: Patch RustDesk sources for Flutter 3.44 (arm64)
         # arm64 is the only target on Flutter 3.44; apply its source/pubspec deltas on the fly
@@ -256,31 +256,24 @@ jobs:
           doNotCache: false
 
       - name: Install vcpkg dependencies
-        # googlesource.com (aom/libyuv 等 port 源) 偶发 HTTP 502, 带重试
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
-          USE_AOM_391: 1
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 180
-          max_attempts: 3
-          retry_wait_seconds: 120
-          shell: bash
-          command: |
-            if ! $VCPKG_ROOT/vcpkg \
-              install \
-              --triplet ${{ matrix.job.vcpkg-triplet }} \
-              --x-install-root="$VCPKG_ROOT/installed"; then
-              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-                echo "$_1:"
-                echo "======"
-                cat "$_1"
-                echo "======"
-                echo ""
-              done
-              exit 1
-            fi
-            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet ${{ matrix.job.vcpkg-triplet }} \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+        shell: bash
 
       - name: Set SODIUM_LIB_DIR (arm64)
         # libsodium-sys ships no arm64 Windows prebuilt lib; point it at the vcpkg-built one
@@ -289,18 +282,6 @@ jobs:
         shell: bash
         run: echo "SODIUM_LIB_DIR=$VCPKG_ROOT/installed/${{ matrix.job.vcpkg-triplet }}/lib" >> "$GITHUB_ENV"
 
-      - name: Prefetch cargo dependencies with retry
-        # cargo 的 git 依赖 (如 rust-webm 的 libwebm 子模块, 指向 chromium.googlesource.com)
-        # 偶发 HTTP 502 会直接让 build.py 里的 cargo build 失败; 先带重试地 fetch 预热,
-        # 之后 cargo build 直接命中本地 checkout, 不再需要联网
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 20
-          max_attempts: 3
-          retry_wait_seconds: 60
-          shell: bash
-          command: cargo fetch --locked
-
       - name: Build rustdesk
         run: |
           # Windows: build RustDesk
@@ -308,44 +289,19 @@ jobs:
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec ${{ matrix.job.build-args }}
           mv ./flutter/build/windows/${{ matrix.job.flutter-arch }}/runner/Release ./rustdesk
 
-      - name: Download usbmmidd_v2 with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: |
-            $tmpZip = Join-Path $PWD.Path ("usbmmidd_v2.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
-            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpZip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
-            Move-Item -Force $tmpZip .\usbmmidd_v2.zip
-
-      - name: Extract usbmmidd_v2
-        run: |
+          # Download usbmmidd_v2.zip and extract it to ./rustdesk
+          Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
           Expand-Archive usbmmidd_v2.zip -DestinationPath .
           Remove-Item -Path usbmmidd_v2\Win32 -Recurse
           Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
           mv -Force .\usbmmidd_v2 ./rustdesk
 
-      - name: Download printer driver files with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: |
-            $tmpDriver = Join-Path $PWD.Path ("rustdesk_printer_driver_v4-1.4.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
-            $tmpAdapter = Join-Path $PWD.Path ("printer_driver_adapter.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
-            $tmpChecksums = Join-Path $PWD.Path ("sha256sums.{0}" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
-            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpDriver https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip
-            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpAdapter https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip
-            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpChecksums https://github.com/rustdesk/hbb_common/releases/download/driver/sha256sums
-            Move-Item -Force $tmpDriver rustdesk_printer_driver_v4-1.4.zip
-            Move-Item -Force $tmpAdapter printer_driver_adapter.zip
-            Move-Item -Force $tmpChecksums sha256sums
-
-      - name: Install printer driver files
-        run: |
+          # Download printer driver files and extract them to ./rustdesk
           try {
+            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
+            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
+            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/sha256sums -OutFile sha256sums
+
             # Check and move the files
             $checksum_driver = (Select-String -Path .\sha256sums -Pattern '^([a-fA-F0-9]{64}) \*rustdesk_printer_driver_v4-1.4\.zip$').Matches.Groups[1].Value
             $downloadsum_driver = Get-FileHash -Path rustdesk_printer_driver_v4-1.4.zip -Algorithm SHA256
@@ -383,20 +339,22 @@ jobs:
             ls -l ./libs/portable/Runner.res;
           fi
 
-      - name: Download RustDeskTempTopMostWindow from R2
-        shell: bash
-        run: |
-          mkdir -p ./rustdesk
-          TW_PLATFORM=${{ matrix.job.arch == 'aarch64' && 'ARM64' || 'x64' }}
-          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/topmostwindow/${TW_PLATFORM}/WindowInjection.dll ./rustdesk/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Download RustDeskTempTopMostWindow artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ inputs.upload-artifact }}
+        with:
+          name: ${{ matrix.job.arch == 'aarch64' && 'topmostwindow-artifacts-ARM64' || 'topmostwindow-artifacts-x64' }}
+          path: "./rustdesk"
+
+      - name: Upload unsigned
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}
+          path: rustdesk
 
       - name: Sign rustdesk files
-        if: env.SIGN_BASE_URL != '-2'
+        if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
         shell: bash
         run: |
           pip3 install requests argparse
@@ -404,6 +362,7 @@ jobs:
 
       - name: Build self-extracted executable
         shell: bash
+        if: env.UPLOAD_ARTIFACT == 'true'
         run: |
           sed -i '/dpiAware/d' res/manifest.xml
           pushd ./libs/portable
@@ -415,11 +374,18 @@ jobs:
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+        with:
+          # Select the MSBuild process architecture; -p:Platform sets the MSI target.
+          # Native ARM64 tools give the compiler more address space for PCH files
+          # (C3859/C1076 were reported by HostX86\arm64\CL.exe).
+          # Keep the action's default x86 MSBuild for the existing x64 MSI job.
+          msbuild-architecture: ${{ matrix.job.arch == 'aarch64' && 'arm64' || 'x86' }}
 
       - name: Build msi
         # Builds the MSI for the matrix arch. res/msi (WiX v4 + native CustomActions) carries
         # both x64 and ARM64 platform configs; WcaUtil/DUtil ship arm64 libs. msbuild platform
         # is x64 / ARM64; the produced Package.msi is globbed since its bin/<platform>/ dir varies.
+        if: env.UPLOAD_ARTIFACT == 'true'
         run: |
           pushd ./res/msi
           python preprocess.py --arp -d ../../rustdesk
@@ -430,30 +396,76 @@ jobs:
           mv $msi.FullName ../../SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.msi
           sha256sum ../../SignOutput/rustdesk-*.msi
 
+      - name: Build pre-built MSI template
+        # Two things this works around: preprocess.py rewrites res/msi in place, so the
+        # tree is reset around this second variant; and it locates the app as
+        # <app-name>.exe inside the dist, so the dist copy is renamed to match.
+        #
+        # The placeholder is chosen to keep this template as close to the shipped msi as
+        # possible: eight characters like "RustDesk", and a valid 8.3 name, so WiX
+        # derives no short name for it. A longer placeholder would get one, and a patch
+        # cannot rewrite a truncated placeholder, leaving short names pointing at it.
+        #
+        # It still has to be unique, which is why "RustDesk" itself cannot be used:
+        # it also names payload that must never be renamed, such as librustdesk.dll
+        # and drivers\RustDeskPrinterDriver.
+        #
+        #
+        # Building the arm64 template on the native arm64 runner makes the ARM
+        # package available: the build agents are x64 and cannot run
+        # preprocess.py against an ARM exe.
+        if: env.UPLOAD_ARTIFACT == 'true'
+        run: |
+          git checkout -- res/msi
+          cp -r ./rustdesk ./rustdesk-msi-template
+          mv ./rustdesk-msi-template/rustdesk.exe ./rustdesk-msi-template/RDAPPNAM.exe
+          Set-Content -Path ./rustdesk-msi-template/custom.txt -Value 'placeholder' -NoNewline
+          $assets = './rustdesk-msi-template/data/flutter_assets/assets'
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+          foreach ($a in 'icon.ico','icon.png','logo.png','logo_light.png','logo_dark.png') {
+            Set-Content -Path "$assets/$a" -Value 'placeholder' -NoNewline
+          }
+          pushd ./res/msi
+          python preprocess.py --arp --template --revision-version 0 -d ../../rustdesk-msi-template --app-name RDAPPNAM
+          $msiPlatform = if ('${{ matrix.job.arch }}' -eq 'aarch64') { 'ARM64' } else { 'x64' }
+          msbuild msi.sln -t:clean -p:Configuration=Release -p:Platform=$msiPlatform
+          msbuild msi.sln -p:Configuration=Release -p:Platform=$msiPlatform /p:TargetVersion=Windows10
+          $msi = Get-ChildItem ./Package/bin/*/Release/en-us/Package.msi | Select-Object -First 1
+          popd
+          mkdir ./msi-template
+          mv $msi.FullName ./msi-template/rustdesk-template-${{ matrix.job.arch }}.msi
+          git checkout -- res/msi
+          rm -r -fo ./rustdesk-msi-template
+
+      - name: Upload unsigned msi template
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-unsigned-msi-template-${{ matrix.job.arch }}
+          path: ./msi-template
+
       - name: Sign rustdesk self-extracted file
-        if: env.SIGN_BASE_URL != '-2'
+        if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
         shell: bash
         run: |
           BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./SignOutput
 
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          aws s3 cp ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.exe s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/windows/${{ matrix.job.arch }}/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          aws s3 cp ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.msi s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/windows/${{ matrix.job.arch }}/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Publish Release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        if: env.UPLOAD_ARTIFACT == 'true'
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ./SignOutput/rustdesk-*.msi
+            ./SignOutput/rustdesk-*.exe
 
   # The fallback for the flutter version, we use Sciter for 32bit Windows.
   build-for-windows-sciter:
     name: ${{ matrix.job.target }} (${{ matrix.job.os }})
     runs-on: ${{ matrix.job.os }}
+    # Temporarily disable this action due to additional test is needed.
+    # if: false
     strategy:
       fail-fast: false
       matrix:
@@ -480,42 +492,26 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Redirect googlesource fetches to GitHub mirrors
-        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
-        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
-        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
-        shell: bash
-        run: |
-          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-          git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
-
       - name: Install LLVM and Clang
         uses: rustdesk-org/install-llvm-action-32bit@6aa7d9ad3df84dff01cd4596dd0fc880a7f47fce # no release tag; commit 2026-05-26
         with:
           version: ${{ env.LLVM_VERSION }}
 
-      - name: Pre-install non-host Rust toolchain (i686 on x64 runner)
-        # rustup >= 1.28 refuses to install or set as default a toolchain whose host triple
-        # differs from the machine without --force-non-host (`rustup default` has no such
-        # flag and still refuses). The sciter i686 build relies on the host toolchain being
-        # i686 (no --target in cargo build), so: force-install it, then point every rustup
-        # proxy at it via RUSTUP_TOOLCHAIN instead of `rustup default`. The dtolnay step
-        # below is skipped for i686 because it would run the refusing `rustup default`.
-        if: matrix.job.target == 'i686-pc-windows-msvc'
+      - name: Install Rust toolchain
         shell: bash
         run: |
-          rustup toolchain install nightly-2023-10-13-i686-pc-windows-msvc --force-non-host --profile minimal --no-self-update
-          rustup component add rustfmt --toolchain nightly-2023-10-13-i686-pc-windows-msvc || true
-          echo "RUSTUP_TOOLCHAIN=nightly-2023-10-13-i686-pc-windows-msvc" >> $GITHUB_ENV
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        if: matrix.job.target != 'i686-pc-windows-msvc'
-        with:
-          toolchain: nightly-2023-10-13-${{ matrix.job.target }} # must use nightly here, because of abi_thiscall feature required
-          targets: ${{ matrix.job.target }}
-          components: "rustfmt"
+          # Sciter's abi_thiscall feature requires nightly Rust.
+          # Use an i686 host toolchain so build scripts can load the 32-bit LLVM installed above.
+          # Since rustup 1.29.1, i686 toolchains on x64 Windows require --force-non-host
+          # for both installation and default selection, even though WOW64 can run them.
+          # See https://github.com/rust-lang/rustup/pull/4935.
+          # Alternatively, an x64 compiler could use cargo build --target i686-pc-windows-msvc.
+          # This requires 64-bit LLVM for host build scripts and updated packaging paths,
+          # and has not been manually verified for RustDesk.
+          rustup toolchain install nightly-2023-10-13-${{ matrix.job.target }} \
+            --target ${{ matrix.job.target }} --component rustfmt \
+            --profile minimal --no-self-update --force-non-host
+          rustup default nightly-2023-10-13-${{ matrix.job.target }} --force-non-host
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -529,38 +525,24 @@ jobs:
           doNotCache: false
 
       - name: Install vcpkg dependencies
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 60
-          max_attempts: 3
-          retry_wait_seconds: 120
-          command: |
-            $vcpkgRoot = $env:VCPKG_ROOT
-            & "$vcpkgRoot\vcpkg.exe" install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$vcpkgRoot\installed"
-            if ($LASTEXITCODE -ne 0) {
-              Get-ChildItem -Path $vcpkgRoot -Recurse -Filter *.log | ForEach-Object {
-                Write-Host "$($_.FullName):"
-                Write-Host "======"
-                Get-Content $_.FullName
-                Write-Host "======"
-                Write-Host ""
-              }
-              exit 1
-            }
-            $ffmpegLog = Join-Path $vcpkgRoot "buildtrees\ffmpeg\build-${{ matrix.job.vcpkg-triplet }}-rel-out.log"
-            Get-Content $ffmpegLog -Head 100 -ErrorAction SilentlyContinue
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
-
-      - name: Prefetch cargo dependencies with retry
-        # cargo 的 git 依赖 (libwebm 子模块指向 chromium.googlesource.com) 偶发 502, 带重试预热
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 20
-          max_attempts: 3
-          retry_wait_seconds: 60
-          shell: bash
-          command: cargo fetch --locked
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet ${{ matrix.job.vcpkg-triplet }} \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+        shell: bash
 
       - name: Build rustdesk
         id: build
@@ -573,29 +555,15 @@ jobs:
           cargo build --locked --features inline,vram,hwcodec --release --bins
           mkdir -p ./Release
           mv ./target/release/rustdesk.exe ./Release/rustdesk.exe
+          curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
           echo "output_folder=./Release" >> $GITHUB_OUTPUT
-
-      - name: Download sciter.dll with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 5
-          retry_wait_seconds: 60
-          command: |
-            $tmpSciter = Join-Path $PWD.Path ("sciter.dll.{0}" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
-            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 60 -o $tmpSciter https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x32/sciter.dll
-            Move-Item -Force $tmpSciter .\Release\sciter.dll
-
-      - name: Download usbmmidd_v2 with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: |
-            $tmpZip = Join-Path $PWD.Path ("usbmmidd_v2.{0}.zip" -f ([guid]::NewGuid().ToString("N").Substring(0, 6)))
-            curl.exe -fL --retry 5 --retry-all-errors --retry-delay 30 -o $tmpZip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
-            Move-Item -Force $tmpZip .\usbmmidd_v2.zip
+          curl -LJ -o ./usbmmidd_v2.zip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
+          unzip usbmmidd_v2.zip
+          # Do not remove x64 files, because the user may run the 32bit version on a 64bit system.
+          # Do not remove ./usbmmidd_v2/deviceinstaller64.exe, as x86 exe cannot install and uninstall drivers when running on x64,
+          # we need the x64 exe to install and uninstall the driver.
+          rm -rf ./usbmmidd_v2/deviceinstaller.exe ./usbmmidd_v2/usbmmidd.bat
+          mv ./usbmmidd_v2 ./Release || true
 
       - name: find Runner.res
         # Windows: find Runner.res (compiled from ./flutter/windows/runner/Runner.rc), copy to ./Runner.res
@@ -613,8 +581,15 @@ jobs:
             ls -l ./libs/portable/Runner.res;
           fi
 
+      - name: Upload unsigned
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}
+          path: Release
+
       - name: Sign rustdesk files
-        if: env.SIGN_BASE_URL != '-2'
+        if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
         shell: bash
         run: |
           pip3 install requests argparse
@@ -632,28 +607,22 @@ jobs:
           mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.exe
 
       - name: Sign rustdesk self-extracted file
-        if: env.SIGN_BASE_URL != '-2'
+        if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
         shell: bash
         run: |
           BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./SignOutput/
 
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          aws s3 cp ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.exe s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/windows/x86/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Publish Release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        if: env.UPLOAD_ARTIFACT == 'true'
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ./SignOutput/rustdesk-*.exe
 
   build-rustdesk-ios:
-    # 未签名 ipa: 不需要任何 Apple 证书/profile, 产物供 TrollStore / 越狱设备(AppSync Unified) /
-    # AltStore-Sideloadly 使用。默认关闭, 由调用方(flutter-nightly)的 build-ios 输入按需开启。
-    # 曾因 "iOS build issues" 被整体禁用; 本次同时把 runner 从漂移的 macos-latest 换成 macos-14
-    # (与 mac arm64 job 同镜像, 已验证可跑 Flutter 3.24.5)。
-    if: ${{ inputs.build-ios }}
+    if: ${{ inputs.upload-artifact }}
     name: build rustdesk ios ipa
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
@@ -664,8 +633,7 @@ jobs:
           - {
               arch: aarch64,
               target: aarch64-apple-ios,
-              # macos-latest 已漂移到更新的 Xcode, Flutter 3.24.5 需要 Xcode 15 时代镜像
-              os: macos-14,
+              os: macos-latest,
               vcpkg-triplet: arm64-ios,
             }
     steps:
@@ -684,16 +652,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Redirect googlesource fetches to GitHub mirrors
-        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
-        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
-        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
-        shell: bash
-        run: |
-          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-          git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
-
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
@@ -703,55 +661,33 @@ jobs:
       - name: Patch flutter
         run: |
           cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]]; then
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
 
-      - name: Setup vcpkg with retry
-        uses: nick-fields/retry@v3
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
         with:
-          timeout_minutes: 30
-          max_attempts: 5
-          retry_wait_seconds: 60
-          command: |
-            # Setup vcpkg in default location
-            if [ ! -d "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}/.git" ]; then
-              git clone https://github.com/microsoft/vcpkg.git "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
-              cd "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
-              git checkout ${{ env.VCPKG_COMMIT_ID }}
-            fi
-            # Bootstrap vcpkg
-            cd "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
-            ./bootstrap-vcpkg.sh -disableMetrics
-            echo "VCPKG_ROOT=${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" >> $GITHUB_ENV
-          on_retry_command: |
-            echo "Retrying vcpkg setup..."
-            rm -rf "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" || true
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
 
       - name: Install vcpkg dependencies
-        # googlesource.com (aom/libyuv 等 port 源) 偶发 HTTP 502, 带重试
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 180
-          max_attempts: 3
-          retry_wait_seconds: 120
-          shell: bash
-          command: |
-            if ! $VCPKG_ROOT/vcpkg \
-              install \
-              --triplet ${{ matrix.job.vcpkg-triplet }} \
-              --x-install-root="$VCPKG_ROOT/installed"; then
-              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-                echo "$_1:"
-                echo "======"
-                cat "$_1"
-                echo "======"
-                echo ""
-              done
-              exit 1
-            fi
-            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
-          on_retry_command: |
-            echo "Retrying vcpkg install, cleaning up..."
-            rm -rf "${VCPKG_ROOT}/buildtrees" "${VCPKG_ROOT}/packages" || true
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet ${{ matrix.job.vcpkg-triplet }} \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+        shell: bash
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -765,92 +701,46 @@ jobs:
           prefix-key: rustdesk-lib-cache-ios
           key: ${{ matrix.job.target }}
 
-      - name: Restore bridge files from R2
-        shell: bash
-        run: |
-          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          mv ./src/generated_bridge.dart ./flutter/lib/
-          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
-          mv ./src/bridge_generated.h ./flutter/macos/Runner/
-          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
 
       - name: Build rustdesk lib
         run: |
           rustup target add ${{ matrix.job.target }}
           cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
           
-
-      - name: Install ldid
-        uses: nick-fields/retry@v3
+      - name: Upload liblibrustdesk.a Artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 30
-          shell: bash
-          command: brew install ldid
+          name: liblibrustdesk.a
+          path: target/aarch64-apple-ios/release/liblibrustdesk.a
 
       - name: Build rustdesk
         shell: bash
         run: |
           pushd flutter
-          # 构建 (不需要任何 Apple 证书 / provisioning profile)
-          # 注: Flutter 3.24.5 在 no-codesign 下只产 Runner.xcarchive, 会打印
-          #     "Codesigning disabled with --no-codesign, skipping IPA." 且不创建 ipa 目录,
-          #     所以 ipa 由 .github/scripts/create-ios-ipa.sh 手工打 Payload 产出。
-          # 注: zip 的输出目录必须先存在, 否则 zip 报 "Could not create output file" 并以
-          #     exit 15 终止 (2026-09-24 run 35996632080 的失败点)。
-          flutter build ipa --release --no-codesign || true
-          mkdir -p build/ios/ipa
-          if ! ls build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app >/dev/null 2>&1 \
-             && ! ls build/ios/iphoneos/Runner.app >/dev/null 2>&1; then
-            echo "::warning::未找到已构建的 Runner.app, 重新执行 flutter build ios"
-            flutter build ios --release --no-codesign
-          fi
-          popd
+          # flutter build ipa --release --obfuscate --split-debug-info=./split-debug-info --no-codesign
+          # for easy debugging
+          flutter build ipa --release --no-codesign
 
-          # 产出两个 ipa: 未签名版 + 越狱版 (ldid 注入 application-identifier)
-          VERSION="${{ env.VERSION }}" bash .github/scripts/create-ios-ipa.sh
+      # - name: Upload Artifacts
+      #   # if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
+      #   uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      #   with:
+      #     name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
+      #     path: flutter/build/ios/ipa/*.ipa
 
-      - name: Install AWS CLI
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: |
-            cd /tmp
-            curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "AWSCLIV2.pkg"
-            sudo installer -pkg AWSCLIV2.pkg -target /
-
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          DEST="s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/ios/arm64"
-          shopt -s nullglob
-          IPAS=(flutter/build/ios/ipa/*.ipa)
-          if [ ${#IPAS[@]} -eq 0 ]; then
-            echo "ERROR: No .ipa file found in flutter/build/ios/ipa/"
-            ls -la flutter/build/ios/ipa/ || true
-            exit 1
-          fi
-          for f in "${IPAS[@]}"; do
-            echo "Uploading: $f"
-            aws s3 cp "$f" "$DEST/" \
-              --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-              --region auto
-          done
-          echo "== 已上传到 $DEST =="
-          for f in "${IPAS[@]}"; do echo "  - $(basename "$f")"; done
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      # - name: Publish ipa package
+      #   # if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
+      #   uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+      #   with:
+      #     prerelease: true
+      #     tag_name: ${{ env.TAG_NAME }}
+      #     files: |
+      #       flutter/build/ios/ipa/*.ipa
 
 
   build-for-macOS:
@@ -889,16 +779,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Redirect googlesource fetches to GitHub mirrors
-        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
-        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
-        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
-        shell: bash
-        run: |
-          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-          git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
-
       - name: Import the codesign cert
         if: env.MACOS_P12_BASE64 != null
         uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071 # v1
@@ -924,17 +804,13 @@ jobs:
 
       - name: Install rcodesign tool
         if: env.MACOS_P12_BASE64 != null
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: |
-            pushd /tmp
-            wget https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F0.22.0/apple-codesign-0.22.0-macos-universal.tar.gz
-            tar -zxvf apple-codesign-0.22.0-macos-universal.tar.gz
-            mv apple-codesign-0.22.0-macos-universal/rcodesign /usr/local/bin
-            popd
+        shell: bash
+        run: |
+          pushd /tmp
+          wget https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F0.22.0/apple-codesign-0.22.0-macos-universal.tar.gz
+          tar -zxvf apple-codesign-0.22.0-macos-universal.tar.gz
+          mv apple-codesign-0.22.0-macos-universal/rcodesign /usr/local/bin
+          popd
 
       - name: Install build runtime
         run: |
@@ -947,20 +823,15 @@ jobs:
           fi
 
       - name: Install NASM
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: |
-            # Install NASM 2.16.x from official release.
-            # Do NOT use `brew install nasm` which installs NASM 3.x.
-            # NASM 3.x is a complete rewrite with incompatible CLI options and removed features.
-            # aom and other multimedia libraries require NASM 2.x for x86/x86_64 assembly.
-            wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
-            unzip nasm-2.16.03-macosx.zip
-            sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
-            nasm --version
+        run: |
+          # Install NASM 2.16.x from official release.
+          # Do NOT use `brew install nasm` which installs NASM 3.x.
+          # NASM 3.x is a complete rewrite with incompatible CLI options and removed features.
+          # aom and other multimedia libraries require NASM 2.x for x86/x86_64 assembly.
+          wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
+          unzip nasm-2.16.03-macosx.zip
+          sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
+          nasm --version
 
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -971,7 +842,9 @@ jobs:
       - name: Patch flutter
         run: |
           cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]]; then
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
 
       - name: Workaround for flutter issue
         shell: bash
@@ -992,66 +865,38 @@ jobs:
         with:
           prefix-key: ${{ matrix.job.os }}
 
-      - name: Restore bridge files from R2
-        shell: bash
-        run: |
-          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          mv ./src/generated_bridge.dart ./flutter/lib/
-          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
-          mv ./src/bridge_generated.h ./flutter/macos/Runner/
-          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-
-      - name: Setup vcpkg with retry
-        uses: nick-fields/retry@v3
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          timeout_minutes: 30
-          max_attempts: 5
-          retry_wait_seconds: 60
-          command: |
-            # Setup vcpkg in default location
-            if [ ! -d "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}/.git" ]; then
-              git clone https://github.com/microsoft/vcpkg.git "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
-              cd "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
-              git checkout ${{ env.VCPKG_COMMIT_ID }}
-            fi
-            # Bootstrap vcpkg
-            cd "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}"
-            ./bootstrap-vcpkg.sh -disableMetrics
-            echo "VCPKG_ROOT=${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" >> $GITHUB_ENV
-          on_retry_command: |
-            echo "Retrying vcpkg setup..."
-            rm -rf "${VCPKG_INSTALLATION_ROOT:-/usr/local/vcpkg}" || true
+          name: bridge-artifact
+          path: ./
+
+      - name: Test cursor sizing
+        if: ${{ !inputs.upload-artifact && matrix.job.arch == 'aarch64' }}
+        working-directory: flutter
+        run: flutter test --timeout 60s test/cursor_size_test.dart test/cursor_replay_test.dart test/cursor_default_test.dart
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
 
       - name: Install vcpkg dependencies
-        # googlesource.com (libyuv 等 port 源) 偶发 HTTP 502, 带重试
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 180
-          max_attempts: 3
-          retry_wait_seconds: 120
-          command: |
-            if ! $VCPKG_ROOT/vcpkg \
-              install \
-              --x-install-root="$VCPKG_ROOT/installed"; then
-              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-                echo "$_1:"
-                echo "======"
-                cat "$_1"
-                echo "======"
-                echo ""
-              done
-              exit 1
-            fi
-            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
-          on_retry_command: |
-            echo "Retrying vcpkg install, cleaning up..."
-            rm -rf "${VCPKG_ROOT}/buildtrees" "${VCPKG_ROOT}/packages" || true
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
 
       - name: Show version information (Rust, cargo, Clang)
         shell: bash
@@ -1062,16 +907,6 @@ jobs:
           rustup default
           cargo -V
           rustc -V
-
-      - name: Prefetch cargo dependencies with retry
-        # cargo 的 git 依赖 (libwebm 子模块指向 chromium.googlesource.com) 偶发 502, 带重试预热
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 20
-          max_attempts: 3
-          retry_wait_seconds: 60
-          shell: bash
-          command: cargo fetch --locked
 
       - name: Build rustdesk
         run: |
@@ -1085,16 +920,22 @@ jobs:
           ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
 
       - name: create unsigned dmg
+        if: env.UPLOAD_ARTIFACT == 'true'
         run: |
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
           create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
-          # Verify the dmg was created
-          ls -la rustdesk-*.dmg || { echo "ERROR: DMG file was not created"; exit 1; }
+
+      - name: Upload unsigned macOS app
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-unsigned-macos-${{ matrix.job.arch }}
+          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg # can not upload the directory directly or tar.gz, which destroy the link structure, causing the codesign failed
 
       - name: Codesign app and create signed dmg
-        if: env.MACOS_P12_BASE64 != null
+        if: env.MACOS_P12_BASE64 != null && env.UPLOAD_ARTIFACT == 'true'
         run: |
           # Patch create-dmg to give more attempts to unmount image
           CREATE_DMG="$(command -v create-dmg)"
@@ -1105,50 +946,92 @@ jobs:
           security unlock-keychain -p ${{ secrets.MACOS_P12_PASSWORD }} rustdesk.keychain
           # start sign the rustdesk.app and dmg
           rm -rf *.dmg || true
-          codesign --force --options runtime -s ${{ secrets.MACOS_CODESIGN_IDENTITY }} --deep --strict ./flutter/build/macos/Build/Products/Release/RustDesk.app -vvv
+          # the identity secret carries its own shell quoting, so expand it inline like the dmg codesign below
+          bash ./.github/scripts/sign-macos-app.sh \
+            ./flutter/build/macos/Build/Products/Release/RustDesk.app \
+            ${{ secrets.MACOS_CODESIGN_IDENTITY }} \
+            ./flutter/macos/Runner/Release.entitlements
           create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
           codesign --force --options runtime -s ${{ secrets.MACOS_CODESIGN_IDENTITY }} --deep --strict rustdesk-${{ env.VERSION }}.dmg -vvv
           # notarize the rustdesk-${{ env.VERSION }}.dmg
           rcodesign notary-submit --api-key-path ${{ github.workspace }}/rustdesk.json  --staple rustdesk-${{ env.VERSION }}.dmg
 
-      - name: Rename rustdesk (signed dmg only)
+      - name: Rename rustdesk
+        if: env.UPLOAD_ARTIFACT == 'true'
         run: |
-          # Only rename the signed dmg which has no arch suffix
-          # The unsigned dmg already has the correct arch suffix from create-dmg
-          if [ -f "rustdesk-${{ env.VERSION }}.dmg" ]; then
-            mv "rustdesk-${{ env.VERSION }}.dmg" "rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg"
-          fi
-          # List all dmg files for debugging
-          ls -la *.dmg || true
+          for name in rustdesk*??.dmg; do
+              mv "$name" "${name%%.dmg}-${{ matrix.job.arch }}.dmg"
+          done
 
-      - name: Install AWS CLI
-        uses: nick-fields/retry@v3
+      - name: Publish DMG package
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: |
-            cd /tmp
-            curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "AWSCLIV2.pkg"
-            sudo installer -pkg AWSCLIV2.pkg -target /
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            rustdesk*-${{ matrix.job.arch }}.dmg
 
-      - name: Upload to R2
-        shell: bash
+  publish_unsigned:
+    needs:
+      - build-for-macOS
+      - build-for-windows-flutter
+      - build-for-windows-sciter
+    runs-on: ubuntu-latest
+    if: ${{ inputs.upload-artifact }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-unsigned-macos-x86_64
+          path: ./
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-unsigned-macos-aarch64
+          path: ./
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-unsigned-windows-x86_64
+          path: ./windows-x86_64/
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-unsigned-windows-aarch64
+          path: ./windows-aarch64/
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-unsigned-windows-x86
+          path: ./windows-x86/
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-unsigned-msi-template-x86_64
+          path: ./msi-template/
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-unsigned-msi-template-aarch64
+          path: ./msi-template/
+
+      - name: Combine unsigned app
         run: |
-          DATE=$(date +%Y%m%d)
-          DMG_FILE="rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg"
-          if [ ! -f "$DMG_FILE" ]; then
-            echo "ERROR: $DMG_FILE not found, listing current directory:"
-            ls -la *.dmg || true
-            exit 1
-          fi
-          echo "Found DMG file: $DMG_FILE"
-          aws s3 cp "$DMG_FILE" s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/macos/${{ matrix.job.arch }}/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          tar czf rustdesk-${{ env.VERSION }}-unsigned.tar.gz *.dmg windows-x86_64 windows-aarch64 windows-x86 msi-template
+
+      - name: Publish unsigned app
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: rustdesk-${{ env.VERSION }}-unsigned.tar.gz
 
   build-rustdesk-android:
     needs: [generate-bridge]
@@ -1217,7 +1100,6 @@ jobs:
                libgstreamer1.0-dev \
                libgstreamer-plugins-base1.0-dev \
                libgtk-3-dev \
-               libpam0g-dev \
                libpulse-dev \
                libva-dev \
                libxcb-randr0-dev \
@@ -1238,16 +1120,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Redirect googlesource fetches to GitHub mirrors
-        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
-        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
-        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
-        shell: bash
-        run: |
-          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-          git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
-
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
@@ -1257,7 +1129,9 @@ jobs:
       - name: Patch flutter
         run: |
           cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == ${{env.ANDROID_FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if [[ "3.24.5" == ${{env.ANDROID_FLUTTER_VERSION}} ]]; then
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
 
       - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         id: setup-ndk
@@ -1265,80 +1139,46 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: true
 
-      - name: Setup vcpkg with retry
-        uses: nick-fields/retry@v3
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
         with:
-          timeout_minutes: 30
-          max_attempts: 5
-          retry_wait_seconds: 60
-          command: |
-            # Download vcpkg if not exists
-            if [ ! -d "/opt/artifacts/vcpkg/.git" ]; then
-              git clone https://github.com/microsoft/vcpkg.git /opt/artifacts/vcpkg
-              cd /opt/artifacts/vcpkg
-              git checkout ${{ env.VCPKG_COMMIT_ID }}
-            fi
-            # Bootstrap vcpkg
-            cd /opt/artifacts/vcpkg
-            ./bootstrap-vcpkg.sh -disableMetrics
-          on_retry_command: |
-            echo "Retrying vcpkg setup..."
-            rm -rf /opt/artifacts/vcpkg || true
-
-      - name: Set VCPKG_ROOT
-        run: echo "VCPKG_ROOT=/opt/artifacts/vcpkg" >> $GITHUB_ENV
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
 
       - name: Install vcpkg dependencies
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 60
-          max_attempts: 3
-          retry_wait_seconds: 120
-          command: |
-            case ${{ matrix.job.target }} in
-              aarch64-linux-android)
-                ANDROID_TARGET=arm64-v8a
-              ;;
-              armv7-linux-androideabi)
-                ANDROID_TARGET=armeabi-v7a
-              ;;
-              x86_64-linux-android)
-                ANDROID_TARGET=x86_64
-              ;;
-              i686-linux-android)
-                ANDROID_TARGET=x86
-              ;;
-            esac
-            if ! ./flutter/build_android_deps.sh "${ANDROID_TARGET}"; then
-              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-                echo "$_1:"
-                echo "======"
-                cat "$_1"
-                echo "======"
-                echo ""
-              done
-              exit 1
-            fi
-          on_retry_command: |
-            echo "Retrying vcpkg install, cleaning up..."
-            rm -rf ${VCPKG_ROOT}/buildtrees ${VCPKG_ROOT}/installed ${VCPKG_ROOT}/packages || true
-        env:
-          VCPKG_ROOT: /opt/artifacts/vcpkg
-
-      - name: Restore bridge files from R2
-        shell: bash
         run: |
-          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          mv ./src/generated_bridge.dart ./flutter/lib/
-          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
-          mv ./src/bridge_generated.h ./flutter/macos/Runner/
-          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          case ${{ matrix.job.target }} in
+            aarch64-linux-android)
+              ANDROID_TARGET=arm64-v8a
+            ;;
+            armv7-linux-androideabi)
+              ANDROID_TARGET=armeabi-v7a
+            ;;
+            x86_64-linux-android)
+              ANDROID_TARGET=x86_64
+            ;;
+            i686-linux-android)
+              ANDROID_TARGET=x86
+            ;;
+          esac
+          if ! ./flutter/build_android_deps.sh "${ANDROID_TARGET}"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+        shell: bash
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -1351,20 +1191,13 @@ jobs:
           prefix-key: rustdesk-lib-cache-android # TODO: drop '-android' part after caches are invalidated
           key: ${{ matrix.job.target }}
 
-      - name: Install cargo-ndk with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 60
-          command: cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
-
       - name: Build rustdesk lib
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           rustup target add ${{ matrix.job.target }}
+          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
           case ${{ matrix.job.target }} in
             aarch64-linux-android)
               ./flutter/ndk_arm64.sh
@@ -1387,6 +1220,12 @@ jobs:
               cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/x86/librustdesk.so
             ;;
           esac
+
+      - name: Upload Rustdesk library to Artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: librustdesk.so.${{ matrix.job.target }}
+          path: ./target/${{ matrix.job.target }}/release/liblibrustdesk.so
 
       - name: Build rustdesk
         shell: bash
@@ -1448,42 +1287,6 @@ jobs:
           echo "ANDROID_SIGN_TOOL_VERSION=$BUILD_TOOL_VERSION" >> $GITHUB_ENV
           echo Last build tool version is: $BUILD_TOOL_VERSION
 
-      # 上游行为: ANDROID_SIGNING_KEY 为空时 "Sign app APK" 会被 skip, 于是静默上传
-      # debug 签名的 APK (可构建成功, 但无法覆盖安装已装版本)。此处把该情况显式化,
-      # 并在 secrets 不齐/不匹配时给出可读报错, 而不是等 apksigner 抛
-      # 含义模糊的 "keystore password was incorrect"。
-      - name: Verify signing configuration
-        shell: bash
-        env:
-          SIGNING_KEY_B64: ${{ secrets.ANDROID_SIGNING_KEY }}
-          SIGNING_ALIAS: ${{ secrets.ANDROID_ALIAS }}
-          SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
-          if [ -z "$SIGNING_KEY_B64" ]; then
-            echo "::warning::ANDROID_SIGNING_KEY 未设置 -> 跳过正式签名, 产物为 debug 签名, 无法覆盖安装"
-            exit 0
-          fi
-          missing=""
-          [ -z "$SIGNING_ALIAS" ] && missing="$missing ANDROID_ALIAS"
-          [ -z "$SIGNING_STORE_PASSWORD" ] && missing="$missing ANDROID_KEY_STORE_PASSWORD"
-          [ -z "$SIGNING_KEY_PASSWORD" ] && missing="$missing ANDROID_KEY_PASSWORD"
-          if [ -n "$missing" ]; then
-            echo "::error::以下 secrets 已设置 ANDROID_SIGNING_KEY 但仍为空:$missing"
-            exit 1
-          fi
-          printf '%s' "$SIGNING_KEY_B64" | base64 -d > /tmp/signingKey.jks 2>/dev/null || {
-            echo "::error::ANDROID_SIGNING_KEY 不是合法的 base64"; exit 1; }
-          if ! keytool -list -keystore /tmp/signingKey.jks -storetype PKCS12 \
-                 -storepass "$SIGNING_STORE_PASSWORD" -alias "$SIGNING_ALIAS" >/dev/null 2>&1; then
-            echo "::error::keystore 校验失败: ANDROID_KEY_STORE_PASSWORD 或 ANDROID_ALIAS 与 keystore 不匹配"
-            echo "  本地自查: python .rd-ci/verify-android-keystore.py --keystore <ks> --b64 <ks>.b64"
-            echo "  常见原因: 网页填 secret 时带入尾随空格/换行; 生成 keystore 时密码用了双引号导致 \$ ! 被 shell 吞掉"
-            exit 1
-          fi
-          echo "签名配置校验通过 (alias=$SIGNING_ALIAS)"
-
       - uses: r0adkll/sign-android-release@349ebdef58775b1e0d8099458af0816dc79b6407 # v1
         name: Sign app APK
         if: env.ANDROID_SIGNING_KEY != null
@@ -1498,58 +1301,35 @@ jobs:
           # env.ANDROID_SIGN_TOOL_VERSION is set by Step "Setup sign tool version variable"
           BUILD_TOOLS_VERSION: ${{ env.ANDROID_SIGN_TOOL_VERSION }}
 
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          if [ "${{ env.ANDROID_SIGNING_KEY }}" != "" ]; then
-            APK_FILE="${{steps.sign-rustdesk.outputs.signedReleaseFile}}"
-          else
-            APK_FILE="signed-apk/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk"
-          fi
-          case ${{ matrix.job.arch }} in
-            aarch64) ANDROID_ARCH="arm64-v8a" ;;
-            armv7) ANDROID_ARCH="armeabi-v7a" ;;
-            x86_64) ANDROID_ARCH="x86_64" ;;
-          esac
-          aws s3 cp "$APK_FILE" s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/android/${ANDROID_ARCH}/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Upload Artifacts
+        if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
+          path: ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
 
-      - name: Upload librustdesk.so to R2 (intermediate)
-        shell: bash
-        run: |
-          case ${{ matrix.job.target }} in
-            aarch64-linux-android)
-              LIB_NAME="librustdesk.so.aarch64-linux-android"
-              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
-            ;;
-            armv7-linux-androideabi)
-              LIB_NAME="librustdesk.so.armv7-linux-androideabi"
-              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
-            ;;
-            x86_64-linux-android)
-              LIB_NAME="librustdesk.so.x86_64-linux-android"
-              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
-            ;;
-            i686-linux-android)
-              LIB_NAME="librustdesk.so.i686-linux-android"
-              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
-            ;;
-          esac
-          aws s3 cp /tmp/${LIB_NAME} s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/android-libs/${LIB_NAME} \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Publish signed apk package
+        if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
+
+      - name: Publish unsigned apk package
+        if: env.ANDROID_SIGNING_KEY == null && env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            signed-apk/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
 
   build-rustdesk-android-universal:
     needs: [build-rustdesk-android]
     name: build rustdesk android universal apk
+    if: ${{ inputs.upload-artifact }}
     runs-on: ubuntu-24.04
     env:
       reltype: release
@@ -1593,7 +1373,6 @@ jobs:
                libgstreamer1.0-dev \
                libgstreamer-plugins-base1.0-dev \
                libgtk-3-dev \
-               libpam0g-dev \
                libpulse-dev \
                libva-dev \
                libxcb-randr0-dev \
@@ -1614,16 +1393,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Redirect googlesource fetches to GitHub mirrors
-        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
-        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
-        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
-        shell: bash
-        run: |
-          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-          git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
-
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
@@ -1633,42 +1402,40 @@ jobs:
       - name: Patch flutter
         run: |
           cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == ${{env.ANDROID_FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if [[ "3.24.5" == ${{env.ANDROID_FLUTTER_VERSION}} ]]; then
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
 
-      - name: Restore bridge files from R2
-        shell: bash
-        run: |
-          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          mv ./src/generated_bridge.dart ./flutter/lib/
-          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
-          mv ./src/bridge_generated.h ./flutter/macos/Runner/
-          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
 
-      - name: Download Rustdesk libraries from R2
-        shell: bash
-        run: |
-          mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
-          mkdir -p ./flutter/android/app/src/main/jniLibs/armeabi-v7a
-          mkdir -p ./flutter/android/app/src/main/jniLibs/x86_64
-          
-          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/android-libs/librustdesk.so.aarch64-linux-android ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/android-libs/librustdesk.so.armv7-linux-androideabi ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/android-libs/librustdesk.so.x86_64-linux-android ./flutter/android/app/src/main/jniLibs/x86_64/librustdesk.so \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Download Rustdesk library from Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: librustdesk.so.aarch64-linux-android
+          path: ./flutter/android/app/src/main/jniLibs/arm64-v8a
+
+      - name: Download Rustdesk library from Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: librustdesk.so.armv7-linux-androideabi
+          path: ./flutter/android/app/src/main/jniLibs/armeabi-v7a
+
+      - name: Download Rustdesk library from Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: librustdesk.so.x86_64-linux-android
+          path: ./flutter/android/app/src/main/jniLibs/x86_64
+
+      - name: Download Rustdesk library from Artifacts
+        if: ${{ env.reltype == 'debug' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: librustdesk.so.i686-linux-android
+          path: ./flutter/android/app/src/main/jniLibs/x86
 
       - name: Build rustdesk
         shell: bash
@@ -1680,10 +1447,16 @@ jobs:
           sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
           # temporary use debug sign config
           sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
-          # Copy c++_shared.so
+          mv ./flutter/android/app/src/main/jniLibs/arm64-v8a/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
           cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/
+          mv ./flutter/android/app/src/main/jniLibs/armeabi-v7a/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
           cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/
+          mv ./flutter/android/app/src/main/jniLibs/x86_64/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/x86_64/librustdesk.so
           cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/x86_64/
+          if [ "${{ env.reltype }}" = "debug" ]; then
+            mv ./flutter/android/app/src/main/jniLibs/x86/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/x86/librustdesk.so
+            cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/i686-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/x86/
+          fi
           # build flutter
           pushd flutter
           flutter build apk "--${{ env.reltype }}" --target-platform android-arm64,android-arm,android-x64${{ env.x86_target }}
@@ -1699,42 +1472,6 @@ jobs:
           echo "ANDROID_SIGN_TOOL_VERSION=$BUILD_TOOL_VERSION" >> $GITHUB_ENV
           echo Last build tool version is: $BUILD_TOOL_VERSION
 
-      # 上游行为: ANDROID_SIGNING_KEY 为空时 "Sign app APK" 会被 skip, 于是静默上传
-      # debug 签名的 APK (可构建成功, 但无法覆盖安装已装版本)。此处把该情况显式化,
-      # 并在 secrets 不齐/不匹配时给出可读报错, 而不是等 apksigner 抛
-      # 含义模糊的 "keystore password was incorrect"。
-      - name: Verify signing configuration
-        shell: bash
-        env:
-          SIGNING_KEY_B64: ${{ secrets.ANDROID_SIGNING_KEY }}
-          SIGNING_ALIAS: ${{ secrets.ANDROID_ALIAS }}
-          SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
-          if [ -z "$SIGNING_KEY_B64" ]; then
-            echo "::warning::ANDROID_SIGNING_KEY 未设置 -> 跳过正式签名, 产物为 debug 签名, 无法覆盖安装"
-            exit 0
-          fi
-          missing=""
-          [ -z "$SIGNING_ALIAS" ] && missing="$missing ANDROID_ALIAS"
-          [ -z "$SIGNING_STORE_PASSWORD" ] && missing="$missing ANDROID_KEY_STORE_PASSWORD"
-          [ -z "$SIGNING_KEY_PASSWORD" ] && missing="$missing ANDROID_KEY_PASSWORD"
-          if [ -n "$missing" ]; then
-            echo "::error::以下 secrets 已设置 ANDROID_SIGNING_KEY 但仍为空:$missing"
-            exit 1
-          fi
-          printf '%s' "$SIGNING_KEY_B64" | base64 -d > /tmp/signingKey.jks 2>/dev/null || {
-            echo "::error::ANDROID_SIGNING_KEY 不是合法的 base64"; exit 1; }
-          if ! keytool -list -keystore /tmp/signingKey.jks -storetype PKCS12 \
-                 -storepass "$SIGNING_STORE_PASSWORD" -alias "$SIGNING_ALIAS" >/dev/null 2>&1; then
-            echo "::error::keystore 校验失败: ANDROID_KEY_STORE_PASSWORD 或 ANDROID_ALIAS 与 keystore 不匹配"
-            echo "  本地自查: python .rd-ci/verify-android-keystore.py --keystore <ks> --b64 <ks>.b64"
-            echo "  常见原因: 网页填 secret 时带入尾随空格/换行; 生成 keystore 时密码用了双引号导致 \$ ! 被 shell 吞掉"
-            exit 1
-          fi
-          echo "签名配置校验通过 (alias=$SIGNING_ALIAS)"
-
       - uses: r0adkll/sign-android-release@349ebdef58775b1e0d8099458af0816dc79b6407 # v1
         name: Sign app APK
         if: env.ANDROID_SIGNING_KEY != null
@@ -1749,21 +1486,30 @@ jobs:
           # env.ANDROID_SIGN_TOOL_VERSION is set by Step "Setup sign tool version variable"
           BUILD_TOOLS_VERSION: ${{ env.ANDROID_SIGN_TOOL_VERSION }}
 
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          if [ "${{ env.ANDROID_SIGNING_KEY }}" != "" ]; then
-            APK_FILE="${{steps.sign-rustdesk.outputs.signedReleaseFile}}"
-          else
-            APK_FILE="signed-apk/rustdesk-${{ env.VERSION }}-universal${{ env.suffix }}.apk"
-          fi
-          aws s3 cp "$APK_FILE" s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/android/universal/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Upload Artifacts
+        if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
+          path: ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
+
+      - name: Publish signed apk package
+        if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
+
+      - name: Publish unsigned apk package
+        if: env.ANDROID_SIGNING_KEY == null && env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            signed-apk/rustdesk-${{ env.VERSION }}-universal${{ env.suffix }}.apk
 
   build-rustdesk-linux:
     needs: [generate-bridge]
@@ -1814,18 +1560,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Redirect googlesource fetches to GitHub mirrors
-        # googlesource.com (chromium/aomedia) 偶发 502/503, 会让 cargo 拉 rust-webm 的
-        # libwebm 子模块、vcpkg 拉 libyuv/aom port 失败。git config 的 url.insteadOf
-        # 是前缀重写, cargo(libgit2) 和 vcpkg(git) 都会读全局配置, 一步根治。
-        shell: bash
-        run: |
-          git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-          git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-          git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
-
       - name: Set Swap Space
-        if: ${{ matrix.job.arch == 'x86_64' }}
         uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c # v1.0
         with:
           swap-size-gb: 12
@@ -1837,6 +1572,7 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.job.target }}
@@ -1852,90 +1588,61 @@ jobs:
           # only build cdylib
           sed -i  "s/\[\"cdylib\", \"staticlib\", \"rlib\"\]/\[\"cdylib\"\]/g" Cargo.toml
 
-      - name: Restore bridge files from R2
-        shell: bash
-        run: |
-          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          mv ./src/generated_bridge.dart ./flutter/lib/
-          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
-          mv ./src/bridge_generated.h ./flutter/macos/Runner/
-          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-
-      - name: Setup vcpkg with retry
-        uses: nick-fields/retry@v3
+      - name: Restore bridge files
+        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          timeout_minutes: 30
-          max_attempts: 5
-          retry_wait_seconds: 60
-          command: |
-            # Download vcpkg if not exists
-            if [ ! -d "/opt/artifacts/vcpkg/.git" ]; then
-              git clone https://github.com/microsoft/vcpkg.git /opt/artifacts/vcpkg
-              cd /opt/artifacts/vcpkg
-              git checkout ${{ env.VCPKG_COMMIT_ID }}
-            fi
-            # Bootstrap vcpkg
-            cd /opt/artifacts/vcpkg
-            ./bootstrap-vcpkg.sh -disableMetrics
-          on_retry_command: |
-            echo "Retrying vcpkg setup..."
-            rm -rf /opt/artifacts/vcpkg || true
+          name: bridge-artifact
+          path: ./
 
-      - name: Set VCPKG_ROOT
-        run: echo "VCPKG_ROOT=/opt/artifacts/vcpkg" >> $GITHUB_ENV
+      # vcpkg 2026.07.29's SPDX scripts require CMake 4.3+, but this ARM64 runner selects CMake 3.31.
+      - name: Install CMake for vcpkg on Linux ARM64
+        if: matrix.job.arch == 'aarch64' && env.UPLOAD_ARTIFACT == 'true'
+        run: |
+          python3 -m pip install --user "cmake==${VCPKG_CMAKE_VERSION}"
+          user_base="$(python3 -m site --user-base)"
+          "${user_base}/bin/cmake" --version
+          echo "${user_base}/bin" >> "${GITHUB_PATH}"
+
+      - name: Setup vcpkg with Github Actions binary cache
+        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
 
       - name: Install vcpkg dependencies
-        # googlesource.com (aom/libyuv 等 port 源) 偶发 HTTP 502, 带重试
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 180
-          max_attempts: 3
-          retry_wait_seconds: 120
-          command: |
-            sudo apt install -y libva-dev && apt show libva-dev
-            if ! $VCPKG_ROOT/vcpkg \
-              install \
-              --triplet ${{ matrix.job.vcpkg-triplet }} \
-              --x-install-root="$VCPKG_ROOT/installed"; then
-              find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-                echo "$_1:"
-                echo "======"
-                cat "$_1"
-                echo "======"
-                echo ""
-              done
-              exit 1
-            fi
-            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
-          on_retry_command: |
-            echo "Retrying vcpkg install, cleaning up..."
-            rm -rf "${VCPKG_ROOT}/buildtrees" "${VCPKG_ROOT}/packages" || true
-          shell: bash
-
-      - name: Restore bridge files from R2
-        shell: bash
+        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         run: |
-          mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          mv ./src/generated_bridge.dart ./flutter/lib/
-          mv ./src/generated_bridge.freezed.dart ./flutter/lib/
-          mv ./src/bridge_generated.h ./flutter/macos/Runner/
-          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          sudo apt install -y libva-dev && apt show libva-dev
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet ${{ matrix.job.vcpkg-triplet }} \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+        shell: bash
+
+      - name: Restore bridge files
+        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
 
       - uses: rustdesk-org/run-on-arch-action@d3fcfbb632b84cf7f6bc772bfaaa2c2f4f8789a8 # no release tag; commit 2026-05-26
         name: Build rustdesk
         id: vcpkg
+        if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         with:
           arch: ${{ matrix.job.arch }}
           distro: ${{ matrix.job.distro }}
@@ -1964,7 +1671,6 @@ jobs:
                libgstreamer1.0-dev \
                libgstreamer-plugins-base1.0-dev \
                libgtk-3-dev \
-               libpam0g-dev \
                libpulse-dev \
                libva-dev \
                libxcb-randr0-dev \
@@ -1991,10 +1697,6 @@ jobs:
           run: |
             # disable git safe.directory
             git config --global --add safe.directory "*"
-            # googlesource 偶发 502/503: 重定向到 GitHub 镜像 (cargo/vcpkg 都读全局 config)
-            git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-            git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-            git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
             # rust
             pushd /opt
             # do not use rustup, because memory overflow in qemu
@@ -2018,13 +1720,6 @@ jobs:
               export JOBS=""
             fi
             echo $JOBS
-            # cargo 的 git 依赖 (libwebm 子模块指向 googlesource.com) 偶发 HTTP 502, 带重试预热
-            for i in 1 2 3; do
-              if cargo fetch --locked; then break; fi
-              if [ "$i" = 3 ]; then echo "cargo fetch failed after 3 attempts"; exit 1; fi
-              echo "cargo fetch failed (attempt $i), retrying in 60s..."
-              sleep 60
-            done
             cargo build --locked --lib $JOBS --features hwcodec,flutter,unix-file-copy-paste --release
             rm -rf target/release/deps target/release/build
             rm -rf ~/.cargo
@@ -2115,35 +1810,28 @@ jobs:
                 mv "$name" /workspace/"${name%%.rpm}-suse.rpm"
             done
 
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.rpm s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto || true
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Publish debian/rpm package
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            rustdesk-*.deb
+            rustdesk-*.rpm
 
-      - name: Upload .deb to R2 (intermediate)
-        shell: bash
-        run: |
-          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/linux-debs/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Upload deb
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: env.UPLOAD_ARTIFACT == 'true'
+        with:
+          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
+          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
 
       # only x86_64 for arch since we can not find newest arm64 docker image to build
       # old arch image does not make sense for arch since it is "arch" which always update to date
       # and failed to makepkg arm64 on x86_64
       - name: Patch archlinux PKGBUILD
-        if: matrix.job.arch == 'x86_64'
+        if: matrix.job.arch == 'x86_64' && env.UPLOAD_ARTIFACT == 'true'
         run: |
           sed -i "s/x86_64/${{ matrix.job.arch }}/g" res/PKGBUILD
           if [[ "${{ matrix.job.arch }}" == "aarch64" ]]; then
@@ -2151,26 +1839,339 @@ jobs:
           fi
 
       - name: Build archlinux package
-        if: matrix.job.arch == 'x86_64'
+        if: matrix.job.arch == 'x86_64' && env.UPLOAD_ARTIFACT == 'true'
         uses: rustdesk-org/arch-makepkg-action@04200739ed1d0bf6f2188b6736b26a767c57a7f9 # no release tag; commit 2026-05-26
         with:
           packages:
           scripts: |
             cd res && HBB=`pwd`/.. FLUTTER=1 makepkg -f
 
-      - name: Upload archlinux package to R2
-        if: matrix.job.arch == 'x86_64'
-        shell: bash
+      - name: Publish archlinux package
+        if: matrix.job.arch == 'x86_64' && env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            res/rustdesk-${{ env.VERSION }}*.zst
+
+  # Same build as build-rustdesk-linux x86_64 -- same vcpkg/ffmpeg, same ubuntu18.04 container, same
+  # rust and flutter -- only with the drm feature on, so it ships as the separate
+  # rustdesk-unattended-wayland deb. libdrmtap is built on the runner because bionic's meson is too
+  # old for it. A separate job rather than a matrix entry of build-rustdesk-linux: appimage and
+  # flatpak need that job, and a failure here must not skip them.
+  build-rustdesk-linux-drm:
+    needs: [generate-bridge]
+    name: build rustdesk linux drm x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Maximize build space
         run: |
-          DATE=$(date +%Y%m%d)
-          aws s3 cp res/rustdesk-${{ env.VERSION }}*.zst s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/x86_64/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo apt-get update -y
+          sudo apt-get install -y nasm
+          sudo apt-get install -y qemu-user-static
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Set Swap Space
+        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c # v1.0
+        with:
+          swap-size-gb: 12
+
+      - name: Free Space
+        run: |
+          df -h
+          free -m
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: "rustfmt"
+
+      - name: Save Rust toolchain version
+        run: |
+          RUST_TOOLCHAIN_VERSION=$(cargo --version | awk '{print $2}')
+          echo "RUST_TOOLCHAIN_VERSION=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_ENV
+
+      - name: Disable rust bridge build
+        run: |
+          # only build cdylib
+          sed -i  "s/\[\"cdylib\", \"staticlib\", \"rlib\"\]/\[\"cdylib\"\]/g" Cargo.toml
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        run: |
+          sudo apt install -y libva-dev && apt show libva-dev
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet x64-linux \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-x64-linux-rel-out.log" || true
+        shell: bash
+
+      # The container's meson is too old to build libdrmtap, so build it here from the pin in
+      # build.py and hand the .so to the container below via DRMTAP_PREBUILT_DIR.
+      - name: Build libdrmtap
+        run: |
+          sudo apt-get install -y meson ninja-build pkg-config \
+            libdrm-dev libegl1-mesa-dev libgles2-mesa-dev
+          python3 - <<'PY'
+          import importlib.util, sys
+          spec = importlib.util.spec_from_file_location("b", "build.py")
+          b = importlib.util.module_from_spec(spec)
+          sys.argv = ["build.py"]
+          spec.loader.exec_module(b)
+          print(f"::notice::built {b.build_libdrmtap_so()}")
+          PY
+        shell: bash
+
+      - uses: rustdesk-org/run-on-arch-action@d3fcfbb632b84cf7f6bc772bfaaa2c2f4f8789a8 # no release tag; commit 2026-05-26
+        name: Build rustdesk
+        id: vcpkg
+        with:
+          arch: x86_64
+          distro: ubuntu18.04
+          githubToken: ${{ github.token }}
+          setup: |
+            ls -l "${PWD}"
+            ls -l /opt/artifacts/vcpkg/installed
+          dockerRunArgs: |
+            --volume "${PWD}:/workspace"
+            --volume "/opt/artifacts:/opt/artifacts"
+          shell: /bin/bash
+          install: |
+            apt-get update -y
+            echo -e "installing deps"
+            apt-get install -y \
+               build-essential \
+               clang \
+               cmake \
+               curl \
+               gcc \
+               git \
+               g++ \
+               libayatana-appindicator3-dev \
+               libasound2-dev \
+               libclang-10-dev \
+               libgstreamer1.0-dev \
+               libgstreamer-plugins-base1.0-dev \
+               libgtk-3-dev \
+               libpulse-dev \
+               libva-dev \
+               libxcb-randr0-dev \
+               libxcb-shape0-dev \
+               libxcb-xfixes0-dev \
+               libxdo-dev \
+               libxfixes-dev \
+               llvm-10-dev \
+               nasm \
+               ninja-build \
+               pkg-config \
+               tree \
+               python3 \
+               rpm \
+               unzip \
+               wget \
+               xz-utils \
+               libssl-dev
+            # we have libopus compiled by us.
+            apt-get remove -y libopus-dev || true
+            # output devs
+            ls -l ./
+            tree -L 3 /opt/artifacts/vcpkg/installed
+          run: |
+            # disable git safe.directory
+            git config --global --add safe.directory "*"
+            # rust
+            pushd /opt
+            # do not use rustup, because memory overflow in qemu
+            wget -O rust.tar.gz https://static.rust-lang.org/dist/rust-${{env.RUST_TOOLCHAIN_VERSION}}-x86_64-unknown-linux-gnu.tar.gz
+            tar -zxvf rust.tar.gz > /dev/null && rm rust.tar.gz
+            cd rust-${{env.RUST_TOOLCHAIN_VERSION}}-x86_64-unknown-linux-gnu && ./install.sh
+            rm -rf rust-${{env.RUST_TOOLCHAIN_VERSION}}-x86_64-unknown-linux-gnu
+            # edit config
+            mkdir -p ~/.cargo/
+            echo """
+              [source.crates-io]
+              registry = 'https://github.com/rust-lang/crates.io-index'
+            """ > ~/.cargo/config
+            cat ~/.cargo/config
+            # start build
+            pushd /workspace
+            export VCPKG_ROOT=/opt/artifacts/vcpkg
+            # use the .so built on the runner; build.py checks it is the pinned checkout
+            export DRMTAP_PREBUILT_DIR=/workspace/third_party/libdrmtap/build-pkg
+            # ask build.py for the features so this line and the packaging line cannot drift
+            FEATURES=$(python3 ./build.py --flutter --drm --hwcodec --unix-file-copy-paste --print-features)
+            # an empty or error-shaped value would silently build a stock binary
+            for want in drm drm-wake; do
+              case ",$FEATURES," in
+                *",$want,"*) ;;
+                *) echo "::error::build.py returned no '$want' feature: $FEATURES"; exit 1 ;;
+              esac
+            done
+            # Run the drm-gated unit tests HERE, because nowhere else does. The ordinary linux CI
+            # runs the suite, but `drm` is opt-in, so every test behind that feature -- the cursor
+            # rotation and hotspot ones especially -- has no continuous coverage at all otherwise.
+            # Debug rather than --release: these are pure logic tests and the release build is
+            # already the slow part of this job.
+            # A MINIMAL feature set, not the production $FEATURES: these are pure logic tests of
+            # the drm paths, and pulling hwcodec in makes the test binary fail to link at all
+            # (undefined reference to fcntl64 in this container), so the tests never run.
+            #
+            # Two packages, because `cargo test --lib` at the root builds the ROOT package only:
+            # the provenance tests live in libs/scrap and would never be selected from here. The
+            # ordinary linux CI runs --workspace but without the drm feature, so these are not
+            # covered there either.
+            #
+            # awk sums the counts rather than bc, which this container does not install.
+            #
+            # A cargo test FILTER that matches nothing exits 0, so a rename would turn this into a
+            # green no-op. Assert each command actually ran something.
+            run_drm_tests() {
+              local desc="$1"; shift
+              local out
+              out=$("$@" 2>&1) || { echo "$out"; echo "::error::drm tests failed: $desc"; exit 1; }
+              local ran
+              ran=$(echo "$out" | awk '/^running [0-9]+ tests?$/ { n += $2 } END { print n+0 }')
+              echo "$desc ran $ran tests"
+              if [ "$ran" -lt 1 ]; then
+                echo "::error::$desc selected no tests; it was renamed or removed"
+                exit 1
+              fi
+            }
+            run_drm_tests "rustdesk drm_capturer_tests" \
+              cargo test --locked --lib --features drm drm_capturer_tests
+            run_drm_tests "rustdesk ipc::test" \
+              cargo test --locked --lib --features drm ipc::test
+            run_drm_tests "rustdesk cursor_pos_tests" \
+              cargo test --locked --lib --features drm cursor_pos_tests
+            run_drm_tests "rustdesk peer_abs_sample_tests" \
+              cargo test --locked --lib --features drm peer_abs_sample_tests
+            run_drm_tests "rustdesk input_map_tests" \
+              cargo test --locked --lib --features drm input_map_tests
+            run_drm_tests "scrap hotspot_provenance_tests" \
+              cargo test --locked -p scrap --features drm hotspot_provenance_tests
+            run_drm_tests "scrap hotspot_guess_tests" \
+              cargo test --locked -p scrap --features drm hotspot_guess_tests
+            run_drm_tests "scrap plane_rotation_tests" \
+              cargo test --locked -p scrap --features drm plane_rotation_tests
+            cargo build --locked --lib --features "$FEATURES" --release
+            rm -rf target/release/deps target/release/build
+            rm -rf ~/.cargo
+
+            # Setup Flutter
+            # disable git safe.directory
+            git config --global --add safe.directory "*"
+            export PATH=/opt/flutter/bin:$PATH
+            pushd /opt
+            wget https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${{ env.FLUTTER_VERSION }}-stable.tar.xz
+            tar xf flutter_linux_${{ env.FLUTTER_VERSION }}-stable.tar.xz
+            flutter doctor -v
+
+            if [[ "3.24.5" == ${{ env.FLUTTER_VERSION }} ]]; then
+              pushd /opt/flutter
+              git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+              popd
+            fi
+
+            # build flutter
+            pushd /workspace
+            export CARGO_INCREMENTAL=0
+            export DEB_ARCH=amd64
+            python3 ./build.py --flutter --drm --hwcodec --unix-file-copy-paste --skip-cargo
+            for name in rustdesk*??.deb; do
+              mv "$name" "${name%%.deb}-x86_64.deb"
+            done
+
+      # build.py can exit 0 on some inner failures, so check the artifact rather than the status.
+      # The package name is the informed consent for consent-free capture, so a stock binary must
+      # never ship under it: assert the bundled library AND the dlopen path in the binary.
+      - name: Check the deb is a drm build
+        run: |
+          set -euo pipefail
+          # Resolve by glob, not from env.VERSION: build.py names the deb from Cargo.toml, so a
+          # hardcoded name fails with a bare exit 1 the first time those two drift.
+          shopt -s nullglob
+          debs=(rustdesk-unattended-wayland-*-x86_64.deb)
+          if [ "${#debs[@]}" -ne 1 ]; then
+            echo "::error::expected one rustdesk-unattended-wayland-*-x86_64.deb, found ${#debs[@]}: ${debs[*]-none}"
+            exit 1
+          fi
+          deb="${debs[0]}"
+          echo "DRM_DEB=$deb" >> "$GITHUB_ENV"
+          contents="$(dpkg -c "$deb")"
+          if [[ ! "$contents" =~ usr/lib/rustdesk/libdrmtap\.so\.0\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::$deb has no versioned libdrmtap.so.0.x.y"
+            exit 1
+          fi
+          if [[ "$contents" != *"usr/lib/rustdesk/libdrmtap.so.0 ->"* ]]; then
+            echo "::error::$deb has no libdrmtap.so.0 soname symlink"
+            exit 1
+          fi
+          rm -rf /tmp/deb && dpkg-deb -R "$deb" /tmp/deb
+          if ! grep -qF /usr/lib/rustdesk/libdrmtap.so.0 /tmp/deb/usr/share/rustdesk/lib/librustdesk.so; then
+            echo "::error::$deb was not built with the drm feature"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Publish debian package
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ${{ env.DRM_DEB }}
+
+      # No UPLOAD_ARTIFACT gate: on a PR this is the only way to get at the deb that was just built.
+      # always(), because a deb that failed the check above is the one most worth downloading.
+      - name: Upload deb
+        if: always() && env.DRM_DEB != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.DRM_DEB }}
+          path: ${{ env.DRM_DEB }}
 
   build-rustdesk-linux-sciter:
+    if: ${{ inputs.upload-artifact }}
     runs-on: ${{ matrix.job.on }}
     name: build-rustdesk-linux-sciter ${{ matrix.job.target }}
     strategy:
@@ -2219,6 +2220,12 @@ jobs:
           echo "Modified vcpkg.json for armv7 build:"
           grep -A 2 -B 2 '"baseline"' vcpkg.json
 
+      - name: Set Swap Space
+        if: matrix.job.arch == 'armv7'
+        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c # v1.0
+        with:
+          swap-size-gb: 12
+
       - name: Free Space
         run: |
           df -h
@@ -2266,7 +2273,6 @@ jobs:
                libgstreamer-plugins-base1.0-dev \
                libgtk-3-dev \
                liblzma-dev \
-               libpam0g-dev \
                libpulse-dev \
                libva-dev \
                libxcb-randr0-dev \
@@ -2332,10 +2338,6 @@ jobs:
           run: |
             # disable git safe.directory
             git config --global --add safe.directory "*"
-            # googlesource 偶发 502/503: 重定向到 GitHub 镜像 (cargo/vcpkg 都读全局 config)
-            git config --global url."https://github.com/webmproject/libwebm.git".insteadOf "https://chromium.googlesource.com/webm/libwebm"
-            git config --global url."https://github.com/lemenkov/libyuv.git".insteadOf "https://chromium.googlesource.com/libyuv/libyuv"
-            git config --global url."https://github.com/arthenica/libaom.git".insteadOf "https://aomedia.googlesource.com/aom"
             # set python3.7 as default python3
             update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.7 1
             # add built CMake to PATH and set VCPKG_FORCE_SYSTEM_BINARIES Afor arm-linux
@@ -2347,7 +2349,7 @@ jobs:
             mkdir -p ~/.cargo/
             echo """
               [source.crates-io]
-              registry = 'https://github.com/rust-lang/crates.io-index'
+              registry = 'sparse+https://index.crates.io/'
             """ > ~/.cargo/config
             cat ~/.cargo/config
             # install dependencies from vcpkg
@@ -2368,33 +2370,23 @@ jobs:
             # build rustdesk
             python3 ./res/inline-sciter.py
             export CARGO_INCREMENTAL=0
-            # cargo 的 git 依赖 (libwebm 子模块指向 googlesource.com) 偶发 HTTP 502, 带重试预热
-            for i in 1 2 3; do
-              if cargo fetch --locked; then break; fi
-              if [ "$i" = 3 ]; then echo "cargo fetch failed after 3 attempts"; exit 1; fi
-              echo "cargo fetch failed (attempt $i), retrying in 60s..."
-              sleep 60
-            done
+            # armv7 is the only 32-bit target in this job that links the whole binary, and the
+            # release profile uses fat LTO with codegen-units=1. LLVM then merges every module
+            # into a single unit and runs past the ~3GB address space a 32-bit process gets,
+            # aborting rustc with "Rust cannot catch foreign exceptions" (a C++ bad_alloc from
+            # LLVM unwinding into rustc's Rust frames). Thin LTO keeps peak memory bounded and
+            # still allows cross-crate inlining; 64-bit targets keep fat LTO untouched.
+            if [ "${{ matrix.job.arch }}" = "armv7" ]; then
+              export CARGO_PROFILE_RELEASE_LTO=thin
+              export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+            fi
             cargo build --locked --features inline${{ matrix.job.extra_features }} --release --bins --jobs 1
             # make debian package
             mkdir -p ./Release
             mv ./target/release/rustdesk ./Release/rustdesk
+            wget -O ./Release/libsciter-gtk.so https://github.com/c-smile/sciter-sdk/raw/master/bin.lnx/${{ matrix.job.sciter_arch }}/libsciter-gtk.so
             export DEB_ARCH=${{ matrix.job.deb_arch }}
             ./build.py --package ./Release
-
-      - name: Download Linux sciter library with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 5
-          retry_wait_seconds: 60
-          command: |
-            tmp_sciter="$(mktemp ./libsciter-gtk.XXXXXX)"
-            curl -fL --retry 5 --retry-all-errors --retry-delay 60 \
-              -o "$tmp_sciter" \
-              https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/${{ matrix.job.sciter_arch }}/libsciter-gtk.so
-            sudo rm -f ./Release/libsciter-gtk.so
-            sudo install -m 644 "$tmp_sciter" ./Release/libsciter-gtk.so
 
       - name: Rename rustdesk
         shell: bash
@@ -2404,31 +2396,27 @@ jobs:
               cp "$name" "${name%%.deb}-${{ matrix.job.arch }}-sciter.deb"
           done
 
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Publish debian package
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb
 
-      - name: Upload sciter .deb to R2 (intermediate)
-        shell: bash
-        run: |
-          aws s3 cp rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/linux-debs/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Upload deb
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: env.UPLOAD_ARTIFACT == 'true'
+        with:
+          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb
+          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.deb
 
   build-appimage:
     name: Build appimage ${{ matrix.job.target }}
     needs: [build-rustdesk-linux]
     runs-on: ubuntu-22.04
+    if: ${{ inputs.upload-artifact }}
     strategy:
       fail-fast: false
       matrix:
@@ -2441,35 +2429,15 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Download Binary from R2
-        shell: bash
-        run: |
-          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/linux-debs/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb . \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Download Binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
+          path: .
 
       - name: Rename Binary
         run: |
           mv rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb appimage/rustdesk.deb
-
-      - name: Install appimage-builder with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 60
-          command: |
-            sudo apt-get update -y
-            sudo apt-get install -y libarchive-tools libfuse2
-            # appimage-builder 的 setup.py 走 setup_requires 拉取 setuptools_scm；
-            # runner (ubuntu-22.04) 的 setuptools 较旧，setuptools_scm>=10 在 egg_info
-            # 阶段会因 ignore_egg_info_in_manifest 属性缺失而报 AttributeError。
-            # 先装 <10 让已安装发行版满足依赖, 避免 easy_install 拉最新版。
-            sudo pip3 install "setuptools_scm<10"
-            sudo pip3 install git+https://github.com/rustdesk-org/appimage-builder.git
 
       - name: Build appimage package
         shell: bash
@@ -2484,18 +2452,18 @@ jobs:
           sudo pip3 install git+https://github.com/rustdesk-org/appimage-builder.git
           # run appimage-builder
           pushd appimage
+          ./build-apprun.sh ${{ matrix.job.arch }}
           sudo appimage-builder --skip-tests --recipe ./AppImageBuilder-${{ matrix.job.arch }}.yml
+          cmp AppDir/AppRun appimage-build/AppRun/v2.0.0/AppRun-Release-${{ matrix.job.arch }}
 
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          aws s3 cp ./appimage/rustdesk-${{ env.VERSION }}-*.AppImage s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Publish appimage package
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ./appimage/rustdesk-${{ env.VERSION }}-*.AppImage
 
   build-flatpak:
     name: Build flatpak ${{ matrix.job.target }}${{ matrix.job.suffix }}
@@ -2503,6 +2471,7 @@ jobs:
       - build-rustdesk-linux
       - build-rustdesk-linux-sciter
     runs-on: ${{ matrix.job.on }}
+    if: ${{ inputs.upload-artifact }}
     strategy:
       fail-fast: false
       matrix:
@@ -2536,15 +2505,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Download Binary from R2
-        shell: bash
-        run: |
-          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/linux-debs/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.deb . \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Download Binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.deb
+          path: .
 
       - name: Rename Binary
         run: |
@@ -2577,16 +2542,13 @@ jobs:
             flatpak-builder --user --install-deps-from=flathub -y --force-clean --repo=repo ./build ./rustdesk.json
             flatpak build-bundle ./repo rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.flatpak com.rustdesk.RustDesk
 
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          aws s3 cp flatpak/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.flatpak s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/linux/${{ matrix.job.arch }}/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Publish flatpak package
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            flatpak/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.flatpak
 
   build-rustdesk-web:
     if: False
@@ -2619,7 +2581,18 @@ jobs:
         shell: bash
         run: |
           cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]]; then
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
+
+      - name: Patch sources for Flutter 3.44 web
+        # No-op while the web stays on Flutter 3.24.5; makes this job work as-is
+        # once FLUTTER_VERSION moves to 3.44.x (qr_code_scanner + fonts, see script).
+        shell: bash
+        run: |
+          if [[ "${{ env.FLUTTER_VERSION }}" == 3.44.* ]]; then
+            bash .github/patches/apply_flutter_3.44_web_patches.sh
+          fi
 
       # https://rustdesk.com/docs/en/dev/build/web/
       - name: Build web
@@ -2652,13 +2625,11 @@ jobs:
           sha256sum "${dir_name}".tar.gz
           popd
 
-      - name: Upload to R2
-        shell: bash
-        run: |
-          DATE=$(date +%Y%m%d)
-          aws s3 cp flutter/build/rustdesk-${{ env.VERSION }}-${{ env.RELEASE_NAME }}.tar.gz s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/web/ \
-            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
-            --region auto
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Publish web
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            flutter/build/rustdesk-${{ env.VERSION }}-${{ env.RELEASE_NAME }}.tar.gz

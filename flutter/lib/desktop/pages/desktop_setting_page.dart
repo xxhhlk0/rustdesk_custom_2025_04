@@ -17,8 +17,6 @@ import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/printer_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
-import 'package:flutter_hbb/plugin/manager.dart';
-import 'package:flutter_hbb/plugin/widgets/desktop_settings.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -55,7 +53,6 @@ enum SettingsTabKey {
   safety,
   network,
   display,
-  plugin,
   account,
   printer,
   about,
@@ -64,7 +61,8 @@ enum SettingsTabKey {
 class DesktopSettingPage extends StatefulWidget {
   final SettingsTabKey initialTabkey;
   static final List<SettingsTabKey> tabKeys = [
-    SettingsTabKey.general,
+    if (bind.mainGetBuildinOption(key: kOptionHideGeneralSetting) != 'Y')
+      SettingsTabKey.general,
     if (!isWeb &&
         !bind.isOutgoingOnly() &&
         !bind.isDisableSettings() &&
@@ -74,10 +72,9 @@ class DesktopSettingPage extends StatefulWidget {
         bind.mainGetBuildinOption(key: kOptionHideNetworkSetting) != 'Y')
       SettingsTabKey.network,
     if (!bind.isIncomingOnly()) SettingsTabKey.display,
-    if (!isWeb && !bind.isIncomingOnly() && bind.pluginFeatureIsEnabled())
-      SettingsTabKey.plugin,
     if (!bind.isDisableAccount()) SettingsTabKey.account,
     if (isWindows &&
+        !bind.isDisableSettings() &&
         bind.mainGetBuildinOption(key: kOptionHideRemotePrinterSetting) != 'Y')
       SettingsTabKey.printer,
     SettingsTabKey.about,
@@ -95,7 +92,8 @@ class DesktopSettingPage extends StatefulWidget {
       if (index == -1) {
         return;
       }
-      if (Get.isRegistered<PageController>(tag: _kSettingPageControllerTag)) {
+      if (Get.isRegistered<PageController>(tag: _kSettingPageControllerTag) &&
+          Get.isRegistered<Rx<SettingsTabKey>>(tag: _kSettingPageTabKeyTag)) {
         DesktopTabPage.onAddSetting(initialPage: page);
         PageController controller =
             Get.find<PageController>(tag: _kSettingPageControllerTag);
@@ -163,17 +161,23 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
       if (!mounted) {
         return;
       }
-      _canBeBlocked.value = await canBeBlocked();
+      final blocked = await canBeBlocked();
+      if (!mounted) {
+        return;
+      }
+      _canBeBlocked.value = blocked;
     });
   }
 
   @override
   void dispose() {
-    super.dispose();
-    Get.delete<PageController>(tag: _kSettingPageControllerTag);
-    Get.delete<RxInt>(tag: _kSettingPageTabKeyTag);
-    WidgetsBinding.instance.removeObserver(this);
     _videoConnTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    Get.delete<PageController>(tag: _kSettingPageControllerTag);
+    Get.delete<Rx<SettingsTabKey>>(tag: _kSettingPageTabKeyTag);
+    // Get.delete does not dispose a plain ChangeNotifier.
+    controller.dispose();
+    super.dispose();
   }
 
   List<_TabInfo> _settingTabs() {
@@ -195,10 +199,6 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
         case SettingsTabKey.display:
           settingTabs.add(_TabInfo(tab, 'Display',
               Icons.desktop_windows_outlined, Icons.desktop_windows));
-          break;
-        case SettingsTabKey.plugin:
-          settingTabs.add(_TabInfo(
-              tab, 'Plugin', Icons.extension_outlined, Icons.extension));
           break;
         case SettingsTabKey.account:
           settingTabs.add(
@@ -232,9 +232,6 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
           break;
         case SettingsTabKey.display:
           children.add(const _Display());
-          break;
-        case SettingsTabKey.plugin:
-          children.add(const _Plugin());
           break;
         case SettingsTabKey.account:
           children.add(const _Account());
@@ -485,7 +482,8 @@ class _GeneralState extends State<_General> {
   Widget other() {
     final incomingOnly = bind.isIncomingOnly();
     final outgoingOnly = bind.isOutgoingOnly();
-    final showAutoUpdate = isWindows && bind.mainIsInstalled();
+    final showAutoUpdate = (isWindows && bind.mainIsInstalled()) ||
+    (isMacOS && bind.mainIsInstalled() && bind.mainIsInstalledDaemon(prompt: false) && !bind.isCustomClient());
     final children = <Widget>[
       if (!isWeb && !incomingOnly)
         _OptionCheckBox(context, 'Confirm before closing multiple tabs',
@@ -510,6 +508,15 @@ class _GeneralState extends State<_General> {
           'Open connection in new tab',
           kOptionOpenNewConnInTabs,
           isServer: false,
+        ),
+        Tooltip(
+          message: translate('port-forward-mux-tip'),
+          child: _OptionCheckBox(
+            context,
+            'Reuse one connection for port forwarding',
+            kOptionEnablePortForwardMux,
+            isServer: false,
+          ),
         ),
         // though this is related to GUI, but opengl problem affects all users, so put in config rather than local
         if (isLinux)
@@ -567,6 +574,12 @@ class _GeneralState extends State<_General> {
       if (!isWeb && !incomingOnly) ...[
         _OptionCheckBox(
           context,
+          'Enable TCP hole punching',
+          kOptionEnableTcpPunch,
+          isServer: false,
+        ),
+        _OptionCheckBox(
+          context,
           'Enable UDP hole punching',
           kOptionEnableUdpPunch,
           isServer: false,
@@ -578,6 +591,17 @@ class _GeneralState extends State<_General> {
           isServer: false,
         ),
       ],
+      if (!incomingOnly) ...webrtcOptions(context),
+      if (!isWeb && !incomingOnly)
+        Tooltip(
+          message: translate('sync-clipboard-between-sessions-tip'),
+          child: _OptionCheckBox(
+            context,
+            'Sync clipboard between sessions',
+            kOptionAllowSyncClipboardBetweenSessions,
+            isServer: false,
+          ),
+        ),
     ];
 
     // Add client-side wakelock option for desktop platforms
@@ -590,10 +614,6 @@ class _GeneralState extends State<_General> {
       ));
     }
 
-    if (!isWeb && bind.mainShowOption(key: kOptionAllowLinuxHeadless)) {
-      children.add(_OptionCheckBox(
-          context, 'Allow linux headless', kOptionAllowLinuxHeadless));
-    }
     if (!bind.isDisableAccount()) {
       children.add(_OptionCheckBox(
         context,
@@ -860,6 +880,85 @@ class _GeneralState extends State<_General> {
         enabled: !isOptFixed,
       ).marginOnly(left: _kContentHMargin);
     });
+  }
+
+  // How long an already-connected relay is held back to give the direct WebRTC
+  // attempt a chance to win. It only means anything while WebRTC is on, so it
+  // follows the checkbox as an indented sub-option and is hidden outright when
+  // the box is clear — the shape `directIp` uses for its port.
+  List<Widget> webrtcOptions(BuildContext context) {
+    final stored = bind.mainGetLocalOption(key: kOptionRelayFallbackDelay);
+    final controller = TextEditingController(text: stored);
+    // What the field holds against what is saved. Apply is offered only while
+    // the two differ, so an untouched field shows no button at all, and neither
+    // does one typed back to its saved value or cleared when nothing was saved
+    // — the state an "edited" flag alone would still call dirty.
+    final typed = RxString(stored);
+    final saved = RxString(stored);
+    return [
+      _OptionCheckBox(
+        context,
+        'Enable WebRTC P2P connection',
+        kOptionEnableWebrtc,
+        isServer: false,
+        update: (_) => setState(() {}),
+      ),
+      () {
+        final enabled = mainGetLocalBoolOptionSync(kOptionEnableWebrtc);
+        final isOptFixed = isOptionFixed(kOptionRelayFallbackDelay);
+        return Offstage(
+          offstage: !enabled,
+          child: Tooltip(
+            message: translate('relay-fallback-delay-tip'),
+            child: _SubLabeledWidget(
+              context,
+              'Relay fallback delay in seconds',
+              Row(children: [
+                SizedBox(
+                  width: 95,
+                  child: TextField(
+                    controller: controller,
+                    enabled: enabled && !isOptFixed,
+                    onChanged: (v) => typed.value = v,
+                    inputFormatters: [
+                      // Seconds, at most one decimal. Clearing the field is
+                      // allowed and restores the built-in default.
+                      FilteringTextInputFormatter.allow(
+                          RegExp(r'^([0-9]|[1-9][0-9])(\.[0-9]?)?$')),
+                    ],
+                    decoration: const InputDecoration(
+                      hintText: '2.5',
+                      contentPadding:
+                          EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+                    ),
+                  ).workaroundFreezeLinuxMint().marginOnly(right: 15),
+                ),
+                Obx(() => Offstage(
+                      offstage: typed.value.trim() == saved.value.trim(),
+                      child: ElevatedButton(
+                        onPressed: enabled &&
+                                !isOptFixed &&
+                                !typed.value.trim().endsWith('.') &&
+                                double.tryParse(typed.value.trim()) != 0
+                            ? () async {
+                                final v = controller.text.trim();
+                                await bind.mainSetLocalOption(
+                                    key: kOptionRelayFallbackDelay, value: v);
+                                if (controller.text != v) controller.text = v;
+                                typed.value = v;
+                                saved.value = v;
+                              }
+                            : null,
+                        child: Text(translate('Apply')),
+                      ),
+                    ))
+              ]),
+              enabled: enabled && !isOptFixed,
+            ),
+          ),
+        );
+      }(),
+    ];
   }
 }
 
@@ -1297,6 +1396,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
           reverse: true, enabled: enabled),
       ...directIp(context),
       whitelist(),
+      idWhitelist(),
       ...autoDisconnect(context),
       _OptionCheckBox(context, 'keep-awake-during-incoming-sessions-label',
           kOptionKeepAwakeDuringIncomingSessions,
@@ -1452,6 +1552,52 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
     }
 
     return tmpWrapper();
+  }
+
+  Widget idWhitelist() {
+    bool enabled = !locked;
+    RxBool hasIdWhitelist = idWhitelistNotEmpty().obs;
+    update() async {
+      hasIdWhitelist.value = idWhitelistNotEmpty();
+    }
+
+    onChanged(bool? checked) async {
+      changeIdWhiteList(callback: update);
+    }
+
+    final isOptFixed = isOptionFixed(kOptionIdWhitelist);
+    return GestureDetector(
+      child: Tooltip(
+        message: translate('id_whitelist_tip'),
+        child: Obx(() => Row(
+              children: [
+                Checkbox(
+                        value: hasIdWhitelist.value,
+                        onChanged: enabled && !isOptFixed ? onChanged : null)
+                    .marginOnly(right: 5),
+                Offstage(
+                  offstage: !hasIdWhitelist.value,
+                  child: MouseRegion(
+                    child: const Icon(Icons.warning_amber_rounded,
+                            color: Color.fromARGB(255, 255, 204, 0))
+                        .marginOnly(right: 5),
+                    cursor: SystemMouseCursors.click,
+                  ),
+                ),
+                Expanded(
+                    child: Text(
+                  translate('Use ID whitelisting'),
+                  style: TextStyle(color: disabledTextColor(context, enabled)),
+                ))
+              ],
+            )),
+      ),
+      onTap: enabled
+          ? () {
+              onChanged(!hasIdWhitelist.value);
+            }
+          : null,
+    ).marginOnly(left: _kCheckBoxLeftMargin);
   }
 
   Widget hide_cm(bool enabled) {
@@ -1804,7 +1950,6 @@ class _DisplayState extends State<_Display> {
       scrollStyle(context),
       imageQuality(context),
       codec(context),
-      hwEncodeProfile(context),
       if (isDesktop) trackpadSpeed(context),
       if (!isWeb) privacyModeImpl(context),
       other(context),
@@ -1994,459 +2139,6 @@ class _DisplayState extends State<_Display> {
     ]);
   }
 
-  // ===== 硬件编码参数 profile (主机侧编码, 对新会话生效) =====
-  bool? _hwCustomLoaded;
-  final _customPresetCtrl = TextEditingController();
-  final _customRcCtrl = TextEditingController();
-  final _customKbsCtrl = TextEditingController();
-  final _customQCtrl = TextEditingController();
-  final _customFpsCtrl = TextEditingController();
-  final _customGopCtrl = TextEditingController();
-  bool _customAdaptive = true;
-  bool _customPinFps = false;
-  final _customSpatialAqCtrl = TextEditingController();
-  final _customTemporalAqCtrl = TextEditingController();
-  final _customMultipassCtrl = TextEditingController();
-  final _customPreanalysisCtrl = TextEditingController();
-  final Map<String, String> _customVendor = {};
-  final Map<String, TextEditingController> _vendorCtrls = {};
-  final _hwPeerIdCtrl = TextEditingController();
-  String _hwPeerProfile = 'latency';
-
-  @override
-  void dispose() {
-    _customPresetCtrl.dispose();
-    _customRcCtrl.dispose();
-    _customKbsCtrl.dispose();
-    _customQCtrl.dispose();
-    _customFpsCtrl.dispose();
-    _customGopCtrl.dispose();
-    _customSpatialAqCtrl.dispose();
-    _customTemporalAqCtrl.dispose();
-    _customMultipassCtrl.dispose();
-    _customPreanalysisCtrl.dispose();
-    _vendorCtrls.values.forEach((e) => e.dispose());
-    _hwPeerIdCtrl.dispose();
-    super.dispose();
-  }
-
-  String _hwSelected() {
-    final v = bind.mainGetOptionSync(key: kOptionHwEncodeProfile);
-    if (v.startsWith('{')) return 'custom';
-    if (v.isEmpty) return 'balanced';
-    return v;
-  }
-
-  void _loadCustomFields() {
-    if (_hwCustomLoaded != null) return;
-    _hwCustomLoaded = true;
-    final v = bind.mainGetOptionSync(key: kOptionHwEncodeProfile);
-    if (v.startsWith('{')) {
-      try {
-        final map = jsonDecode(v) as Map<String, dynamic>;
-        String s(dynamic x) => x == null ? '' : '$x';
-        _customPresetCtrl.text = s(map['preset']);
-        _customRcCtrl.text = s(map['rc']);
-        _customKbsCtrl.text = s(map['kbs']);
-        _customQCtrl.text = s(map['q']);
-        _customFpsCtrl.text = s(map['fps']);
-        _customGopCtrl.text = s(map['gop']);
-        _customSpatialAqCtrl.text = s(map['spatial_aq']);
-        _customTemporalAqCtrl.text = s(map['temporal_aq']);
-        _customMultipassCtrl.text = s(map['multipass']);
-        _customPreanalysisCtrl.text = s(map['preanalysis']);
-        _customAdaptive = map['bitrate_adaptive'] != false;
-        _customPinFps = map['pin_fps'] == true;
-        _customVendor.clear();
-        final vendor = map['vendor'];
-        if (vendor is Map) {
-          vendor.forEach((k, v) {
-            if (v != null && '$v'.isNotEmpty) _customVendor['$k'] = '$v';
-          });
-        }
-        for (final s in _hwVendorSpecs) {
-          if (s.numeric) {
-            _vendorCtrls
-                .putIfAbsent(s.key, () => TextEditingController())
-                .text = _customVendor[s.key] ?? '';
-          }
-        }
-      } catch (e) {
-        debugPrint('failed to parse hw-encode-profile: $e');
-      }
-    }
-  }
-
-  void _saveHwProfile(String v) {
-    bind.mainSetOption(key: kOptionHwEncodeProfile, value: v);
-    setState(() {});
-  }
-
-  int? _hwParseInt(String t) => t.trim().isEmpty ? null : int.tryParse(t.trim());
-
-  void _saveCustomProfile() {
-    bind.mainSetOption(key: kOptionHwEncodeProfile, value: _customProfileJson());
-  }
-
-  String _customProfileJson() {
-    final vendor = <String, int>{};
-    _customVendor.forEach((k, v) {
-      final n = int.tryParse(v.trim());
-      if (n != null) vendor[k] = n;
-    });
-    final map = <String, dynamic>{
-      'id': 'custom',
-      'preset': _hwParseInt(_customPresetCtrl.text),
-      'rc': _hwParseInt(_customRcCtrl.text),
-      'kbs': _hwParseInt(_customKbsCtrl.text),
-      'q': _hwParseInt(_customQCtrl.text),
-      'fps': _hwParseInt(_customFpsCtrl.text),
-      'gop': _hwParseInt(_customGopCtrl.text),
-      'spatial_aq': _hwParseInt(_customSpatialAqCtrl.text),
-      'temporal_aq': _hwParseInt(_customTemporalAqCtrl.text),
-      'multipass': _hwParseInt(_customMultipassCtrl.text),
-      'preanalysis': _hwParseInt(_customPreanalysisCtrl.text),
-      'bitrate_adaptive': _customAdaptive,
-      'pin_fps': _customPinFps,
-    };
-    if (vendor.isNotEmpty) map['vendor'] = vendor;
-    return jsonEncode(map);
-  }
-
-  List<String> _hwOverridePeers() {
-    final v = bind.mainGetOptionSync(key: kOptionHwEncodeProfilePeers);
-    return v.split(',').where((e) => e.trim().isNotEmpty).map((e) => e.trim()).toList();
-  }
-
-  void _savePeerOverride() {
-    final pid = _hwPeerIdCtrl.text.trim();
-    if (pid.isEmpty) return;
-    final v = _hwPeerProfile == 'custom'
-        ? _customProfileJson()
-        : _hwPeerProfile;
-    if (v.isEmpty) return;
-    bind.mainSetPeerOption(id: pid, key: kOptionHwEncodeProfile, value: v);
-    final peers = _hwOverridePeers();
-    if (!peers.contains(pid)) {
-      peers.add(pid);
-      bind.mainSetOption(key: kOptionHwEncodeProfilePeers, value: peers.join(','));
-    }
-    setState(() {});
-  }
-
-  void _removePeerOverride(String pid) {
-    bind.mainSetPeerOption(id: pid, key: kOptionHwEncodeProfile, value: '');
-    final peers = _hwOverridePeers()..remove(pid);
-    bind.mainSetOption(key: kOptionHwEncodeProfilePeers, value: peers.join(','));
-    setState(() {});
-  }
-
-  String _hwPeerLabel(String v) {
-    if (v.isEmpty) return '';
-    if (v.startsWith('{')) return translate('Custom');
-    return v;
-  }
-
-  Widget _hwField(String label, TextEditingController c,
-      {bool number = false, String hint = ''}) {
-    return Row(
-      children: [
-        SizedBox(
-            width: 120,
-            child: Text(translate(label),
-                style: const TextStyle(fontSize: 13))),
-        Expanded(
-          child: TextField(
-            controller: c,
-            keyboardType: number ? TextInputType.number : TextInputType.text,
-            decoration: InputDecoration(hintText: translate(hint)),
-            onChanged: (_) => _saveCustomProfile(),
-          ),
-        ),
-      ],
-    ).marginOnly(bottom: 6);
-  }
-
-  Widget _hwDropdown(String label, String value, Map<String, String> items,
-      void Function(String) onChanged) {
-    return Row(
-      children: [
-        SizedBox(
-            width: 120,
-            child: Text(translate(label), style: const TextStyle(fontSize: 13))),
-        Expanded(
-          child: DropdownButton<String>(
-            isExpanded: true,
-            value: value,
-            items: items.entries
-                .map((e) => DropdownMenuItem<String>(value: e.key, child: Text(translate(e.value))))
-                .toList(),
-            onChanged: (v) {
-              if (v != null) onChanged(v);
-            },
-          ),
-        ),
-      ],
-    ).marginOnly(bottom: 6);
-  }
-
-  // 1 = 最快/画质最低, 7 = 最慢/画质最好; 空 = 编码器默认预设
-  static const Map<String, String> _hwPresetItems = {
-    '': 'Default (encoder default)',
-    '1': '1 - Fastest (nvenc p1 / qsv veryfast / amf speed)',
-    '2': '2 - Faster (nvenc p2 / qsv faster)',
-    '3': '3 - Fast (nvenc p3 / qsv fast)',
-    '4': '4 - Medium (nvenc p4 / qsv medium / amf balanced)',
-    '5': '5 - Slow (nvenc p5 / qsv slow / amf quality)',
-    '6': '6 - Slower (nvenc p6 / qsv slower)',
-    '7': '7 - Best quality (nvenc p7 / qsv veryslow / amf quality)',
-  };
-
-  static const List<_HwOptSpec> _hwVendorSpecs = [
-    _HwOptSpec('tuning', 'Tuning (nvenc)',
-        values: ['', '1', '2', '3'],
-        labels: ['Default', 'Ultra low latency', 'Low latency', 'High quality']),
-    _HwOptSpec('lookahead_depth', 'Lookahead depth (nvenc)',
-        numeric: true, hint: 'Off if empty'),
-    _HwOptSpec('target_quality', 'Target quality (nvenc VBR)',
-        numeric: true, hint: 'Auto if empty'),
-    _HwOptSpec('num_ref_frame', 'Reference frames',
-        numeric: true, hint: 'Encoder default if empty'),
-    _HwOptSpec('cavlc', 'CAVLC (qsv)',
-        values: ['', '0', '1'], labels: ['Default', 'Off (CABAC)', 'On']),
-    _HwOptSpec('low_power', 'Low power (qsv)',
-        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
-    _HwOptSpec('low_delay_brc', 'Low delay BRC (qsv)',
-        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
-    _HwOptSpec('async_depth', 'Async depth (qsv)',
-        numeric: true, hint: 'Default if empty'),
-    _HwOptSpec('usage', 'Usage (amf)',
-        values: ['', '1', '2', '4'],
-        labels: ['Default', 'Ultra low latency', 'Low latency', 'High quality']),
-    _HwOptSpec('vbaq', 'VBAQ (amf)',
-        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
-    _HwOptSpec('enforce_hrd', 'Enforce HRD (amf)',
-        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
-    _HwOptSpec('slices_per_frame', 'Slices per frame (amf)',
-        numeric: true, hint: 'Default if empty'),
-    _HwOptSpec('high_motion_qb', 'High motion boost (amf)',
-        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
-    _HwOptSpec('lowlatency_mode', 'Low latency mode (amf)',
-        values: ['', '0', '1'], labels: ['Default', 'Off', 'On']),
-    _HwOptSpec('input_queue_size', 'Input queue size (amf)',
-        numeric: true, hint: 'Default if empty'),
-  ];
-
-  List<Widget> _vendorWidgets() {
-    return _hwVendorSpecs.map((s) {
-      final v = _customVendor[s.key] ?? '';
-      if (s.numeric) {
-        return _vendorField(s);
-      }
-      return _hwDropdown(s.label, v, {
-        for (var i = 0; i < s.values.length; i++) s.values[i]: s.labels[i],
-      }, (v) {
-        if (v.isEmpty) {
-          _customVendor.remove(s.key);
-        } else {
-          _customVendor[s.key] = v;
-        }
-        _saveCustomProfile();
-        setState(() {});
-      });
-    }).toList();
-  }
-
-  Widget _vendorField(_HwOptSpec s) {
-    final ctrl = _vendorCtrls.putIfAbsent(
-        s.key, () => TextEditingController(text: _customVendor[s.key] ?? ''));
-    return Row(
-      children: [
-        SizedBox(
-            width: 120,
-            child: Text(translate(s.label), style: const TextStyle(fontSize: 13))),
-        Expanded(
-          child: TextField(
-            controller: ctrl,
-            keyboardType: TextInputType.number,
-            decoration: InputDecoration(hintText: translate(s.hint)),
-            onChanged: (v) {
-              if (v.trim().isEmpty) {
-                _customVendor.remove(s.key);
-              } else {
-                _customVendor[s.key] = v.trim();
-              }
-              _saveCustomProfile();
-            },
-          ),
-        ),
-      ],
-    ).marginOnly(bottom: 6);
-  }
-
-  Widget hwEncodeProfile(BuildContext context) {
-    if (!(bind.mainHasHwcodec() || bind.mainHasVram())) {
-      return Offstage();
-    }
-    _loadCustomFields();
-    final sel = _hwSelected();
-    final isCustom = sel == 'custom';
-    final peers = _hwOverridePeers();
-    return _Card(title: 'Hardware Encode Profile', children: [
-      Text(
-        translate('Changes to the global profile or current client override apply after a brief encoder restart.'),
-        style: const TextStyle(fontSize: 12, color: Colors.grey),
-      ).marginOnly(bottom: 8),
-      _Radio(context,
-          value: 'latency',
-          groupValue: sel,
-          label: 'Low latency (preset Low, CBR)',
-          onChanged: (v) => _saveHwProfile(v)),
-      _Radio(context,
-          value: 'balanced',
-          groupValue: sel,
-          label: 'Balanced (default)',
-          onChanged: (v) => _saveHwProfile(v)),
-      _Radio(context,
-          value: 'quality',
-          groupValue: sel,
-          label: 'Quality first (preset Medium, VBR, GOP 20× FPS)',
-          onChanged: (v) => _saveHwProfile(v)),
-      _Radio(context,
-          value: 'custom',
-          groupValue: sel,
-          label: 'Custom',
-          onChanged: (v) => _saveHwProfile(v)),
-      if (isCustom)
-        Column(children: [
-          Divider(),
-          _hwDropdown(
-              'Encoder preset',
-              _hwPresetItems.containsKey(_customPresetCtrl.text)
-                  ? _customPresetCtrl.text
-                  : '',
-              _hwPresetItems, (v) {
-            _customPresetCtrl.text = v;
-            _saveCustomProfile();
-            setState(() {});
-          }),
-          _hwDropdown('Rate control', _customRcCtrl.text.isEmpty ? '0' : _customRcCtrl.text, {
-            '0': 'Default',
-            '1': 'CBR',
-            '2': 'VBR',
-            '3': 'CQ / constant QP (nvenc/amf/qsv/mediacodec)',
-          }, (v) {
-            _customRcCtrl.text = v;
-            _saveCustomProfile();
-            setState(() {});
-          }),
-          _hwField('Bitrate (kbps)', _customKbsCtrl, number: true, hint: 'Auto if empty'),
-          _hwField('QP (0-51, CQ only)', _customQCtrl, number: true, hint: 'Auto if empty'),
-          _hwField('FPS (encoder)', _customFpsCtrl,
-              number: true, hint: '30 if empty'),
-          _hwField('GOP', _customGopCtrl, number: true, hint: '20× FPS if empty'),
-          _hwDropdown('Spatial AQ (nvenc)', _customSpatialAqCtrl.text, {
-            '': 'Default',
-            '1': 'On',
-            '0': 'Off',
-          }, (v) {
-            _customSpatialAqCtrl.text = v;
-            _saveCustomProfile();
-            setState(() {});
-          }),
-          _hwDropdown('Temporal AQ (nvenc)', _customTemporalAqCtrl.text, {
-            '': 'Default',
-            '1': 'On',
-            '0': 'Off',
-          }, (v) {
-            _customTemporalAqCtrl.text = v;
-            _saveCustomProfile();
-            setState(() {});
-          }),
-          _hwDropdown('Multipass (nvenc)', _customMultipassCtrl.text, {
-            '': 'Default',
-            '0': 'Disabled',
-            '1': 'Two pass, quarter res',
-            '2': 'Two pass, full res',
-          }, (v) {
-            _customMultipassCtrl.text = v;
-            _saveCustomProfile();
-            setState(() {});
-          }),
-          _hwDropdown('Pre-analysis (amf)', _customPreanalysisCtrl.text, {
-            '': 'Default',
-            '1': 'On',
-            '0': 'Off',
-          }, (v) {
-            _customPreanalysisCtrl.text = v;
-            _saveCustomProfile();
-            setState(() {});
-          }),
-          ..._vendorWidgets(),
-          CheckboxListTile(
-              dense: true,
-              title: Text(translate('Allow adaptive bitrate (VideoQoS)')),
-              value: _customAdaptive,
-              onChanged: (v) {
-                _customAdaptive = v ?? true;
-                _saveCustomProfile();
-                setState(() {});
-              }),
-          CheckboxListTile(
-              dense: true,
-              title: Text(translate(
-                  'Force stream FPS (disable VideoQoS FPS adaptation)')),
-              subtitle: Text(
-                  translate('VideoQoS ramps the frame rate up from 15 fps and lowers it when latency rises, so setting FPS alone changes nothing on screen. Enable this to pin the stream to the FPS above. When the network cannot keep up you get stutter instead of an automatic frame rate drop.'),
-                  style: const TextStyle(fontSize: 12)),
-              value: _customPinFps,
-              onChanged: (v) {
-                _customPinFps = v ?? false;
-                _saveCustomProfile();
-                setState(() {});
-              }),
-          Text(
-            translate('Preset: 1 is the fastest / lowest quality, 7 the slowest / best quality (nvenc p1-p7, qsv veryfast-veryslow, amf speed-quality). Empty keeps the encoder default. With CQ the bitrate setting is ignored (a lower QP means better quality and more bandwidth). Quality enhancements are encoder built-in options: spatial AQ / multipass (nvenc), pre-analysis (amf); temporal AQ is not supported by every GPU - if the encoder refuses it, the session retries once with all enhancements removed. Vendor options only apply to the GPU of that vendor; the others ignore them. Options the selected encoder does not support are ignored and a warning is logged - check the host log for "hw encode params" / "nvenc encode params" / "amf encode params" to confirm what really took effect.'),
-            style: const TextStyle(fontSize: 12, color: Colors.grey),
-          ),
-        ]).marginOnly(left: 12),
-      Divider(),
-      Text(translate('Per-client override'),
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500))
-          .marginOnly(bottom: 6),
-      ...peers.map((pid) {
-        final v = bind.mainGetPeerOptionSync(id: pid, key: kOptionHwEncodeProfile);
-        return Row(children: [
-          Expanded(child: Text(pid, style: const TextStyle(fontSize: 13))),
-          Text(_hwPeerLabel(v), style: const TextStyle(fontSize: 13, color: Colors.grey)),
-          IconButton(
-              icon: const Icon(Icons.delete_outline, size: 20),
-              onPressed: () => _removePeerOverride(pid)),
-        ]);
-      }),
-      Row(children: [
-        Expanded(
-          child: TextField(
-            controller: _hwPeerIdCtrl,
-            decoration: InputDecoration(
-                hintText: translate('Peer ID'), isDense: true),
-          ),
-        ),
-        SizedBox(width: 8),
-        DropdownButton<String>(
-          value: _hwPeerProfile,
-          items: ['latency', 'balanced', 'quality', 'custom']
-              .map((e) => DropdownMenuItem<String>(value: e, child: Text(translate(e))))
-              .toList(),
-          onChanged: (v) {
-            if (v != null) setState(() => _hwPeerProfile = v);
-          },
-        ),
-        TextButton(onPressed: _savePeerOverride, child: Text(translate('Save'))),
-      ]),
-    ]);
-  }
-
   Widget privacyModeImpl(BuildContext context) {
     final supportedPrivacyModeImpls = bind.mainSupportedPrivacyModeImpls();
     late final List<dynamic> privacyModeImpls;
@@ -2484,14 +2176,13 @@ class _DisplayState extends State<_Display> {
   }
 
   Widget otherRow(String label, String key) {
-    final value = bind.mainGetUserDefaultOption(key: key) == 'Y';
-    final isOptFixed = isOptionFixed(key);
+    final value = getOtherDefaultSettingOption(key) == 'Y';
+    final isOptFixed = isOtherDefaultSettingReadOnly(key);
     onChanged(bool b) async {
-      await bind.mainSetUserDefaultOption(
-          key: key,
-          value: b
-              ? 'Y'
-              : (key == kOptionEnableFileCopyPaste ? 'N' : defaultOptionNo));
+      await setOtherDefaultSettingOption(
+        key,
+        b ? 'Y' : (key == kOptionEnableFileCopyPaste ? 'N' : defaultOptionNo),
+      );
       setState(() {});
     }
 
@@ -2661,51 +2352,6 @@ class _CheckboxState extends State<_Checkbox> {
   }
 }
 
-class _Plugin extends StatefulWidget {
-  const _Plugin({Key? key}) : super(key: key);
-
-  @override
-  State<_Plugin> createState() => _PluginState();
-}
-
-class _PluginState extends State<_Plugin> {
-  @override
-  Widget build(BuildContext context) {
-    bind.pluginListReload();
-    final scrollController = ScrollController();
-    return ChangeNotifierProvider.value(
-      value: pluginManager,
-      child: Consumer<PluginManager>(builder: (context, model, child) {
-        return ListView(
-          controller: scrollController,
-          children: model.plugins.map((entry) => pluginCard(entry)).toList(),
-        ).marginOnly(bottom: _kListViewBottomMargin);
-      }),
-    );
-  }
-
-  Widget pluginCard(PluginInfo plugin) {
-    return ChangeNotifierProvider.value(
-      value: plugin,
-      child: Consumer<PluginInfo>(
-        builder: (context, model, child) => DesktopSettingsCard(plugin: model),
-      ),
-    );
-  }
-
-  Widget accountAction() {
-    return Obx(() => _Button(
-        gFFI.userModel.userName.value.isEmpty
-            ? 'Login'
-            : '${translate('Logout')} (${gFFI.userModel.accountLabelWithHandle})',
-        () => {
-              gFFI.userModel.userName.value.isEmpty
-                  ? loginDialog()
-                  : logOutConfirmDialog()
-            }));
-  }
-}
-
 class _Printer extends StatefulWidget {
   const _Printer({super.key});
 
@@ -2868,17 +2514,20 @@ class _AboutState extends State<_About> {
       final version = await bind.mainGetVersion();
       final buildDate = await bind.mainGetBuildDate();
       final fingerprint = await bind.mainGetFingerprint();
+      final myId = await bind.mainGetMyId();
       return {
         'license': license,
         'version': version,
         'buildDate': buildDate,
-        'fingerprint': fingerprint
+        'fingerprint': fingerprint,
+        'myId': myId
       };
     }(), hasData: (data) {
       final license = data['license'].toString();
       final version = data['version'].toString();
       final buildDate = data['buildDate'].toString();
       final fingerprint = data['fingerprint'].toString();
+      final myId = data['myId'].toString();
       const linkStyle = TextStyle(decoration: TextDecoration.underline);
       final scrollController = ScrollController();
       return SingleChildScrollView(
@@ -2900,6 +2549,9 @@ class _AboutState extends State<_About> {
                 SelectionArea(
                     child: Text('${translate('Fingerprint')}: $fingerprint')
                         .marginSymmetric(vertical: 4.0)),
+              SelectionArea(
+                  child: Text('${translate('ID')}: $myId')
+                      .marginSymmetric(vertical: 4.0)),
               InkWell(
                   onTap: () {
                     launchUrlString('https://rustdesk.com/privacy.html');
@@ -3394,21 +3046,6 @@ _LabeledTextField(
       ),
     ],
   ).marginOnly(bottom: 8);
-}
-
-// 厂商私有编码参数的一项: key 为 hwcodec C 侧 opts 的键名, 空值表示不下发 (保持编码器默认)
-class _HwOptSpec {
-  const _HwOptSpec(this.key, this.label,
-      {this.values = const [],
-      this.labels = const [],
-      this.numeric = false,
-      this.hint = ''});
-  final String key;
-  final String label;
-  final List<String> values;
-  final List<String> labels;
-  final bool numeric;
-  final String hint;
 }
 
 class _CountDownButton extends StatefulWidget {

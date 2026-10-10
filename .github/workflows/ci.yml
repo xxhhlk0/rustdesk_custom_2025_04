@@ -5,10 +5,24 @@ env:
 #   CICD_INTERMEDIATES_DIR: "_cicd-intermediates"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   # for multiarch gcc compatibility
-  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - ".github/**"
+      - "docs/**"
+      - "README.md"
+      - "res/**"
+      - "appimage/**"
+      - "flatpak/**"
 
 jobs:
   # ensure_cargo_fmt:
@@ -110,7 +124,6 @@ jobs:
                gcc \
                git \
                g++ \
-               libpam0g-dev \
                libasound2-dev \
                libunwind-dev \
                libgstreamer1.0-dev \

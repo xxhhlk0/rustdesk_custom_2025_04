@@ -5,10 +5,10 @@
 
 use hbb_common::anyhow::{anyhow, Context};
 use hbb_common::log;
-use hbb_common::message_proto::{Chroma, EncodedVideoFrame, EncodedVideoFrames, VideoFrame};
 use hbb_common::ResultType;
+use base::message_proto::{Chroma, EncodedVideoFrame, EncodedVideoFrames, VideoFrame};
 
-use crate::codec::{base_bitrate, codec_thread_num, soft_decode_threads, EncoderApi};
+use crate::codec::{base_bitrate, codec_thread_num, EncoderApi};
 use crate::{EncodeInput, EncodeYuvFormat, GoogleImage, Pixfmt, STRIDE_ALIGN};
 
 use super::vpx::{vp8e_enc_control_id::*, vpx_codec_err_t::*, *};
@@ -39,8 +39,6 @@ pub struct VpxEncoder {
     id: VpxVideoCodecId,
     i444: bool,
     yuvfmt: EncodeYuvFormat,
-    /// 强制下一帧为 IDR (客户端丢帧后请求同步用, 一帧后自动清除)
-    force_keyframe_: bool,
 }
 
 pub struct VpxDecoder {
@@ -167,7 +165,6 @@ impl EncoderApi for VpxEncoder {
                     id: config.codec,
                     i444,
                     yuvfmt: Self::get_yuvfmt(config.width, config.height, i444),
-                    force_keyframe_: false,
                 })
             }
             _ => Err(anyhow!("encoder type mismatch")),
@@ -213,11 +210,6 @@ impl EncoderApi for VpxEncoder {
         Ok(())
     }
 
-    fn force_keyframe(&mut self) -> ResultType<()> {
-        self.force_keyframe_ = true;
-        Ok(())
-    }
-
     fn bitrate(&self) -> u32 {
         let c = unsafe { *self.ctx.config.enc.to_owned() };
         c.rc_target_bitrate
@@ -260,18 +252,12 @@ impl VpxEncoder {
             data.as_ptr() as _,
         ));
 
-        let flags = if self.force_keyframe_ {
-            self.force_keyframe_ = false;
-            VPX_EFLAG_FORCE_KF as _
-        } else {
-            0
-        };
         call_vpx!(vpx_codec_encode(
             &mut self.ctx,
             &image,
             pts as _,
             1, // Duration
-            flags,
+            0, // Flags
             VPX_DL_REALTIME as _,
         ));
 
@@ -463,10 +449,7 @@ impl VpxDecoder {
         };
         let mut ctx = Default::default();
         let cfg = vpx_codec_dec_cfg_t {
-            // 解码: 物理核心数, 不做内存钳制 (见 codec::soft_decode_threads)。
-            // codec_thread_num 的 min(内存/2) 是给编码的参考帧/率控缓冲设计的,
-            // 解码沿用会把 8 核手机钳到 1 线程。
-            threads: soft_decode_threads() as _,
+            threads: codec_thread_num(64) as _,
             w: 0,
             h: 0,
         };

@@ -542,6 +542,26 @@ extern "C"
         SHAddToRecentDocs(SHARD_PATHW, path);
     }
 
+    // Hyper-V Enhanced Session names do not have the usual "rdp" prefix.
+    static bool is_rdp_session_by_protocol(DWORD session_id)
+    {
+        LPSTR buffer = nullptr;
+        DWORD bytes = 0;
+        if (!WTSQuerySessionInformationA(
+                WTS_CURRENT_SERVER_HANDLE, session_id, WTSClientProtocolType, &buffer, &bytes)) {
+            flog("Failed to query protocol for session %lu: Windows error %lu\n",
+                session_id, GetLastError());
+            return false;
+        }
+        std::unique_ptr<char, decltype(&WTSFreeMemory)> protocol_info(buffer, WTSFreeMemory);
+        if (!buffer || bytes < sizeof(USHORT)) {
+            flog("Failed to query protocol for session %lu: Windows error %lu\n",
+                session_id, static_cast<DWORD>(ERROR_INVALID_DATA));
+            return false;
+        }
+        return *reinterpret_cast<const USHORT *>(buffer) == WTS_PROTOCOL_TYPE_RDP;
+    }
+
     DWORD get_current_session(BOOL include_rdp)
     {
         auto rdp_or_console = WTSGetActiveConsoleSessionId();
@@ -573,84 +593,15 @@ extern "C"
                     {
                         rdp_or_console = info.SessionId;
                     }
+                    else if (is_rdp_session_by_protocol(info.SessionId))
+                    {
+                        rdp_or_console = info.SessionId;
+                    }
                 }
             }
             WTSFreeMemory(pInfos);
         }
         return rdp_or_console;
-    }
-
-    BOOL session_has_user(DWORD session_id)
-    {
-        if (GetLogonPid(session_id, TRUE) != 0)
-            return TRUE;
-        if (GetFallbackUserPid(session_id) != 0)
-            return TRUE;
-        return FALSE;
-    }
-
-    DWORD pick_capture_session()
-    {
-        const DWORD special_sessions[] = {65536, 655};
-        PWTS_SESSION_INFOA pInfos = NULL;
-        DWORD count = 0;
-        DWORD dwConsoleId = WTSGetActiveConsoleSessionId();
-
-        // physical console candidate with a usable user token source
-        DWORD console_with_user = 0;
-        // any non-special session with explorer.exe (GetLogonPid(TRUE)) success
-        DWORD explorer_session = 0;
-        // any non-special session with only fallback user token source
-        DWORD fallback_session = 0;
-
-        if (!WTSEnumerateSessionsA(WTS_CURRENT_SERVER_HANDLE, NULL, 1, &pInfos, &count))
-            return 0;
-
-        for (DWORD i = 0; i < count; i++)
-        {
-            auto info = pInfos[i];
-            auto sid = info.SessionId;
-            if (sid == 0)
-                continue;
-            bool special = false;
-            for (DWORD k = 0; k < sizeof(special_sessions) / sizeof(special_sessions[0]); k++)
-            {
-                if (sid == special_sessions[k])
-                {
-                    special = true;
-                    break;
-                }
-            }
-            if (special)
-                continue;
-
-            bool is_console = (info.pWinStationName != NULL &&
-                               !stricmp(info.pWinStationName, "console")) ||
-                              (dwConsoleId != 0 && sid == dwConsoleId);
-
-            DWORD logonPid = GetLogonPid(sid, TRUE);
-            DWORD pid = logonPid;
-            if (pid == 0)
-                pid = GetFallbackUserPid(sid);
-            if (pid == 0)
-                continue; // no usable user token source
-
-            if (is_console && console_with_user == 0)
-                console_with_user = sid;
-            if (logonPid != 0 && explorer_session == 0)
-                explorer_session = sid;
-            if (fallback_session == 0)
-                fallback_session = sid;
-        }
-        WTSFreeMemory(pInfos);
-
-        if (console_with_user != 0)
-            return console_with_user;
-        if (explorer_session != 0)
-            return explorer_session;
-        if (fallback_session != 0)
-            return fallback_session;
-        return 0;
     }
 
     BOOL is_session_locked(DWORD session_id)
@@ -738,6 +689,9 @@ extern "C"
                     }
                     else if (include_rdp && !strnicmp(info.pWinStationName, ica, nica)) {
                         sessionIds.push_back(std::wstring(L"ICA:") + std::to_wstring(info.SessionId));
+                    }
+                    else if (include_rdp && is_rdp_session_by_protocol(info.SessionId)) {
+                        sessionIds.push_back(std::wstring(L"RDP:") + std::to_wstring(info.SessionId));
                     }
                 }
             }
