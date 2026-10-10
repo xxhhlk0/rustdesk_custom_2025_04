@@ -9,7 +9,7 @@
 | 对象 | 当前值 |
 |---|---|
 | 上游基点 | rustdesk/rustdesk `1.5.0`（`fada664d`） |
-| 相对上游改动 | **45 个文件**（`git diff --name-only upstream/master HEAD`） |
+| 相对上游改动 | **44 个文件**（`git diff --name-only upstream/master HEAD`） |
 | 相关 fork | `xxhhlk0/hbb_common`、`xxhhlk0/hwcodec`（见「自定义功能 §5 依赖的 fork」） |
 
 > 1.5.0 同步方式：以官方 1.5.0 树为基底重建工作区，本地自定义按功能块逐条回补，见 `git log` 中 `chore(sync): rebase 基底到上游 rustdesk 1.5.0` 之后的提交。
@@ -157,7 +157,7 @@ aws s3 cp s3://{R2_BUCKET}/1.5.0/20261011/windows/x86_64/rustdesk-1.5.0-x86_64.e
 
 ## 修改的文件
 
-相对上游 1.5.0 共改动 45 个文件（`git diff --name-only upstream/master HEAD`）。
+相对上游 1.5.0 共改动 44 个文件（`git diff --name-only upstream/master HEAD`）。
 
 ### CI / 构建
 
