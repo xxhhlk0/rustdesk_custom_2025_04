@@ -71,7 +71,31 @@ gstreamer-video = { version = "0.16", optional = true }
 zbus = { version = "3.15", optional = true }
 
 [dependencies.hwcodec]
-git = "https://github.com/rustdesk-org/hwcodec"
+# fork: VRAM 通道透传编码 profile (preset/rc/QP/画质增强) + 恢复 encoder preset 生效 +
+# CQ 码率控制 (nvenc constqp / amf cqp / qsv ICQ) + 可选画质增强 + 码控日志 +
+# qsv 编码吞吐修复 (async_depth=1 + low_power=1 + low_delay_brc=1, 1440p 78fps -> 154fps)
+# + 首帧 EAGAIN 容忍 + open 失败自动回退 (见 BUILD.md 第 8 条)
+# + 环形 surface 池 + d3d11 VP input/output view 按纹理缓存 (原每帧新建 2 个 view)
+# + mfx 原生路径异步编码流水线 (AsyncDepth>1 延迟收取, vram 通道实际走 mfx 驱动!)
+# + mfx 异步: MORE_DATA 不再当致命错误 (否则硬件探测失败 -> vram_encode=[] 禁用硬编)
+# + qsv/vaapi hw_async_depth 默认改回 1 (async_depth=2 时首帧不出包, 会被运行时
+#   误判降级到 AV1 软编; 改 1 首帧即出, 不降级, 与 Sunshine 取值一致)
+# + VRAM 编码参数透传: *_new_encoder FFI 追加 opts (key=value;key=value),
+#   mfx/nvenc/amf 原生路径按 preset(1-7)/rc/q 与厂商私有项映射到各自 SDK,
+#   ffmpeg_vram 补 preset 映射与 qsv 选项 (不配置时行为不变)
+# + ram 解码: 名字含 mediacodec 的解码器延迟 open, 首次 decode 时从码流首包
+#   摘出 SPS/PPS(H265 另加 VPS) 当 extradata 再 open (ffmpeg 的 mediacodec
+#   wrapper 在 open 阶段就要求 extradata 非空, 否则 EINVAL -> open 失败);
+#   其它解码器路径不变
+# + 编码参数优先级: 手动设置 (profile) 覆盖内建默认。ffmpeg_ram 通道补齐 opts
+#   透传 (此前 RAM 通道没有入口, async_depth/low_power 被内建默认静默盖掉),
+#   两个通道共用 apply_qsv_vendor_opts, 每个覆盖项打一行日志
+# + VRAM 编码提速: VideoProcessor 的颜色空间/rect 不再每帧重下发 (只在变更时),
+#   删掉 Process() 里两个从未被读取的 GetDesc; 新增 vp detail / vram enc detail
+#   耗时拆分日志 (convert 与 encode 分开, 否则 Rust 侧 avg_enc 看不出谁慢)
+# branch: custom-1.4.9
+git = "https://github.com/xxhhlk0/hwcodec"
+rev = "1db2a694a7e6df63671c5c14e6f8fc3275c63be6"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
