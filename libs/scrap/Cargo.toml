@@ -95,7 +95,7 @@ zbus = { version = "3.15", optional = true }
 #   耗时拆分日志 (convert 与 encode 分开, 否则 Rust 侧 avg_enc 看不出谁慢)
 # branch: custom-1.4.9
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "3dc56e43ca68a6ba30d9b0fe493052d0febb10d1"
+rev = "b3fa7b1d4aa39bd2a25f18467b8af0a9ffd1bc16"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
