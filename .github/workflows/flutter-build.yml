@@ -7,7 +7,7 @@ on:
         description: "构建 iOS 未签名 ipa (TrollStore / 越狱设备 / AltStore 可用)"
         required: false
         type: boolean
-        default: false
+        default: true
 
 # NOTE: F-Droid builder script 'flutter/build_fdroid.sh' reads environment
 # variables from this workflow!
@@ -743,7 +743,7 @@ jobs:
 
   build-rustdesk-ios:
     # 未签名 ipa: 不需要任何 Apple 证书/profile, 产物供 TrollStore / 越狱设备(AppSync Unified) /
-    # AltStore-Sideloadly 使用。默认关闭, 由调用方(flutter-nightly)的 build-ios 输入按需开启。
+    # AltStore-Sideloadly 使用。默认开启 (default: true), 调用方可传 build-ios: false 关闭。
     # 曾因 "iOS build issues" 被整体禁用; 本次同时把 runner 从漂移的 macos-latest 换成 macos-14
     # (与 mac arm64 job 同镜像, 已验证可跑 Flutter 3.24.5)。
     if: ${{ inputs.build-ios }}
