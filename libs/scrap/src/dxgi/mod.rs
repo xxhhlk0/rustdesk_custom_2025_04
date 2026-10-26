@@ -639,7 +639,7 @@ impl Capturer {
                         self.copy_texture.0 as *mut _,
                         self.texture.0 as *mut _,
                     );
-                    (*self.duplication.0).ReleaseFrame();
+                    self.release_frame()?;
                     (*(self.copy_texture.0 as *mut IUnknown)).AddRef();
                     self.texture = ComPtr(self.copy_texture.0);
                 }
