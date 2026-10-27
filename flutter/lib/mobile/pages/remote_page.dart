@@ -182,7 +182,19 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
+      _requestKeyFrameOnResume();
     }
+  }
+
+  // 后台期间视频帧仍在到达, 但界面不消费, 队列很快积压。回前台时积压的旧帧
+  // 会被丢弃 (discard_queue), 解码器随后只能等下一个关键帧; 而被控端只在队列
+  // 再次积压触发 refresh 时才补发 IDR, 于是画面长时间停在 0fps, 直到用户手动
+  // 切换编码器等操作强制重建。这里在回前台时主动请求一次关键帧, 让解码器立即
+  // 恢复, 无需等待积压或人工干预。
+  void _requestKeyFrameOnResume() {
+    final pi = gFFI.ffiModel.pi;
+    if (pi.displays.isEmpty) return;
+    sessionRefreshVideo(sessionId, pi);
   }
 
   // For client side
