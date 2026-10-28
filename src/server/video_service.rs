@@ -1606,13 +1606,15 @@ fn check_qos(
     name: &str,
 ) -> ResultType<()> {
     let mut video_qos = VIDEO_QOS.lock().unwrap();
-    *spf = video_qos.spf();
-    // 硬件编码 profile: pin_fps 时忽略 VideoQoS 的帧率自适应, 直接固定出帧间隔
-    // (VideoQoS 默认从 INIT_FPS=15 起按延迟爬升, 且延迟升高时主动降帧;
-    //  这里固定后网络拥塞表现为卡顿而非降帧, 属用户显式选择的取舍)
+    // 帧率只由客户端上限决定 (custom_fps / auto_adjust, 多客户端取最小),
+    // VideoQoS 的动态帧率自适应整体旁路; 画质/码率自适应仍然保留。
+    // 网络拥塞表现为卡顿而非降帧, 属用户显式选择的取舍。
+    // 硬件编码 profile 的 pin_fps 仍生效, 与客户端上限取更小值。
+    let mut fixed_fps = video_qos.client_fps_cap();
     if let Some(fps) = crate::hw_encode_profile::pinned_fps() {
-        *spf = Duration::from_secs_f32(1. / (fps as f32));
+        fixed_fps = fixed_fps.min(fps);
     }
+    *spf = Duration::from_secs_f32(1. / (fixed_fps as f32));
     // 硬件编码 profile: bitrate_adaptive=false 时抑制 VideoQoS 的运行期动态码率调整,
     // 码率目标改由控制端显式选档决定; profile 指定 kbs 时码率固定, 不做运行期调整。
     // 录制状态切换与显示数据更新不受影响。

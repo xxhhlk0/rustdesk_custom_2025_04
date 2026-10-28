@@ -676,6 +676,13 @@ impl VideoQoS {
             .clamp(MIN_FPS, MAX_FPS)
     }
 
+    /// Frame rate cap asked by the viewers: each viewer's custom/auto-adjust
+    /// limit, minimum across viewers. Used to pin the send interval to the
+    /// client-requested cap instead of the adaptive VideoQoS frame rate.
+    pub fn client_fps_cap(&self) -> u32 {
+        self.highest_fps()
+    }
+
     // Get latest quality settings from all users
     pub fn latest_quality(&self) -> Quality {
         self.users
