@@ -30,6 +30,9 @@ import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import android.util.DisplayMetrics
+import android.view.InputDevice
+import android.view.MotionEvent
+import android.view.View
 import androidx.annotation.RequiresApi
 import org.json.JSONArray
 import org.json.JSONObject
@@ -54,6 +57,14 @@ class MainActivity : FlutterActivity() {
     private val channelTag = "mChannel"
     private val logTag = "mMainActivity"
     private var mainService: MainService? = null
+
+    // Android O+ pointer capture: delivers raw relative deltas that bypass the
+    // system pointer acceleration, mirroring the macOS native relative mode.
+    private var hostMethodChannel: MethodChannel? = null
+    private var relativeMouseCaptureRequested = false
+    private var relativeMouseRemainderX = 0f
+    private var relativeMouseRemainderY = 0f
+    private var capturedPointerListener: View.OnCapturedPointerListener? = null
     private sealed class PendingPicker {
         data class ImportFiles(val result: MethodChannel.Result) : PendingPicker()
         data class ExportFile(val source: File, val result: MethodChannel.Result) : PendingPicker()
@@ -87,6 +98,7 @@ class MainActivity : FlutterActivity() {
             channelTag
         )
         initFlutterChannel(flutterMethodChannel!!)
+        initHostChannel(flutterEngine)
         thread {
             try {
                 setCodecInfo()
@@ -105,6 +117,96 @@ class MainActivity : FlutterActivity() {
                 mapOf("name" to "input", "value" to inputPer.toString())
             )
         }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // The system drops pointer capture when the window loses focus.
+        if (hasFocus && relativeMouseCaptureRequested &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+        ) {
+            window?.decorView?.requestPointerCapture()
+        }
+    }
+
+    private fun initHostChannel(flutterEngine: FlutterEngine) {
+        hostMethodChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "org.rustdesk.rustdesk/host"
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "enableNativeRelativeMouseMode" -> result.success(enableRelativeMouseCapture())
+                    "disableNativeRelativeMouseMode" -> {
+                        disableRelativeMouseCapture()
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
+    }
+
+    private fun enableRelativeMouseCapture(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        val view = window?.decorView ?: return false
+        relativeMouseRemainderX = 0f
+        relativeMouseRemainderY = 0f
+        relativeMouseCaptureRequested = true
+        val listener = View.OnCapturedPointerListener { _, event ->
+            handleCapturedPointerEvent(event)
+        }
+        capturedPointerListener = listener
+        view.setOnCapturedPointerListener(listener)
+        view.requestPointerCapture()
+        return true
+    }
+
+    private fun disableRelativeMouseCapture() {
+        relativeMouseCaptureRequested = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            window?.decorView?.let { view ->
+                view.setOnCapturedPointerListener(null)
+                capturedPointerListener = null
+                if (view.hasPointerCapture()) {
+                    view.releasePointerCapture()
+                }
+            }
+        }
+    }
+
+    private fun handleCapturedPointerEvent(event: MotionEvent): Boolean {
+        if (!relativeMouseCaptureRequested) return false
+        val axisX: Int
+        val axisY: Int
+        when (event.source) {
+            InputDevice.SOURCE_MOUSE_RELATIVE -> {
+                axisX = MotionEvent.AXIS_X
+                axisY = MotionEvent.AXIS_Y
+            }
+            InputDevice.SOURCE_TOUCHPAD -> {
+                axisX = MotionEvent.AXIS_RELATIVE_X
+                axisY = MotionEvent.AXIS_RELATIVE_Y
+            }
+            else -> return false
+        }
+        var dx = event.getAxisValue(axisX)
+        var dy = event.getAxisValue(axisY)
+        for (i in 0 until event.historySize) {
+            dx += event.getHistoricalAxisValue(axisX, i)
+            dy += event.getHistoricalAxisValue(axisY, i)
+        }
+        // Keep the fractional part so slow movements are not rounded away.
+        relativeMouseRemainderX += dx
+        relativeMouseRemainderY += dy
+        val x = relativeMouseRemainderX.toInt()
+        val y = relativeMouseRemainderY.toInt()
+        relativeMouseRemainderX -= x
+        relativeMouseRemainderY -= y
+        if (x != 0 || y != 0) {
+            hostMethodChannel?.invokeMethod("onMouseDelta", mapOf("dx" to x, "dy" to y))
+        }
+        return true
     }
 
     private fun requestMediaProjection() {
@@ -233,6 +335,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         Log.e(logTag, "onDestroy")
+        disableRelativeMouseCapture()
         // The process can outlive the UI whenever something keeps it alive:
         // MainService, or the accessibility InputService on its own. Only the
         // former gets onTaskRemoved, so close outgoing sessions here too,

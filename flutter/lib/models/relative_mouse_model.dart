@@ -42,8 +42,10 @@ class RelativeMouseModel {
 
   final RelativeMouseAccumulator _accumulator = RelativeMouseAccumulator();
 
-  // Native relative mouse mode support (macOS only)
-  // Uses CGAssociateMouseAndMouseCursorPosition to lock cursor and NSEvent monitor for raw delta.
+  // Native relative mouse mode support (macOS and Android)
+  // macOS uses CGAssociateMouseAndMouseCursorPosition to lock cursor and NSEvent monitor for raw delta.
+  // Android uses View.requestPointerCapture to receive SOURCE_MOUSE_RELATIVE deltas,
+  // bypassing the system pointer acceleration.
   static MethodChannel? _hostChannel;
   // The currently active model receiving native mouse delta events.
   // Note: Race condition between multiple sessions is not a concern here because
@@ -55,9 +57,9 @@ class RelativeMouseModel {
   static bool _hostChannelInitialized = false;
 
   /// Initialize the host channel for native relative mouse mode.
-  /// This should be called once when the app starts on macOS.
+  /// This should be called once when the app starts on macOS or Android.
   static void initHostChannel() {
-    if (!isMacOS) return;
+    if (!isMacOS && !isAndroid) return;
     if (_hostChannelInitialized) return;
     _hostChannelInitialized = true;
 
@@ -86,7 +88,7 @@ class RelativeMouseModel {
   }
 
   Future<bool> _enableNativeRelativeMouseMode() async {
-    if (!isMacOS) return false;
+    if (!isMacOS && !isAndroid) return false;
     if (_hostChannel == null) {
       initHostChannel();
       if (_hostChannel == null) return false;
@@ -117,7 +119,7 @@ class RelativeMouseModel {
   }
 
   Future<void> _disableNativeRelativeMouseMode() async {
-    if (!isMacOS) return;
+    if (!isMacOS && !isAndroid) return;
     if (_hostChannel == null) return;
 
     // Only the owning model should disable native mode to avoid
@@ -139,7 +141,7 @@ class RelativeMouseModel {
 
   // Whether native relative mouse mode is currently active for this model
   bool get _isNativeRelativeMouseModeActive =>
-      isMacOS && _activeNativeModel == this;
+      (isMacOS || isAndroid) && _activeNativeModel == this;
 
   // Pointer lock center in LOCAL widget coordinates (for delta calculation)
   Offset? _pointerLockCenterLocal;
@@ -441,8 +443,21 @@ class RelativeMouseModel {
             });
           }
         } else {
-          // Mobile: enable immediately (no platform-specific setup needed)
-          _completeEnableRelativeMouseMode();
+          if (isAndroid) {
+            // Android: request pointer capture for raw, unaccelerated deltas.
+            // Even if capture fails, finish enabling so touch-based relative
+            // controls (virtual joystick) keep working as before.
+            final requestId = ++_enableRequestId;
+            _enableNativeRelativeMouseMode().then((success) {
+              if (_enableRequestId != requestId) {
+                return;
+              }
+              _completeEnableRelativeMouseMode();
+            });
+          } else {
+            // Mobile: enable immediately (no platform-specific setup needed)
+            _completeEnableRelativeMouseMode();
+          }
         }
       } catch (e) {
         _disableWithCleanup();
@@ -469,6 +484,9 @@ class RelativeMouseModel {
         } else {
           _releaseCursorClip();
         }
+      } else if (isAndroid) {
+        // Android: release pointer capture and restore the system cursor.
+        _disableNativeRelativeMouseMode();
       }
       enabled.value = false;
       _resetState();
