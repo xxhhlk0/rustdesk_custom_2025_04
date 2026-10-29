@@ -68,6 +68,9 @@ class MainActivity : FlutterActivity() {
     private var relativeMouseRemainderY = 0f
     private var captureEventLogCount = 0
     private var captureReported = false
+    private val captureRetry = Runnable {
+        if (relativeMouseCaptureRequested) requestRelativeMouseCapture()
+    }
     private var capturedPointerListener: View.OnCapturedPointerListener? = null
     private sealed class PendingPicker {
         data class ImportFiles(val result: MethodChannel.Result) : PendingPicker()
@@ -181,6 +184,9 @@ class MainActivity : FlutterActivity() {
         capturedPointerListener = listener
         view.setOnCapturedPointerListener(listener)
         requestRelativeMouseCapture()
+        // The first request can race with window focus; retry until granted.
+        view.postDelayed(captureRetry, 300)
+        view.postDelayed(captureRetry, 1000)
         return true
     }
 
@@ -188,7 +194,9 @@ class MainActivity : FlutterActivity() {
     private fun requestRelativeMouseCapture() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val view = captureTargetView() ?: return
-        view.requestPointerCapture()
+        if (!view.hasPointerCapture()) {
+            view.requestPointerCapture()
+        }
         // The grant is asynchronous, report what the system actually did.
         view.post { reportPointerCaptureState() }
     }
@@ -211,6 +219,7 @@ class MainActivity : FlutterActivity() {
     private fun disableRelativeMouseCapture() {
         relativeMouseCaptureRequested = false
         captureReported = false
+        captureTargetView()?.removeCallbacks(captureRetry)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             captureTargetView()?.let { view ->
                 view.setOnCapturedPointerListener(null)

@@ -369,7 +369,9 @@ fn run_pos(sp: EmptyExtraFieldService, state: &mut StatePos) -> ResultType<()> {
         let exclude = {
             let now = get_time();
             let lock = LATEST_PEER_INPUT_CURSOR.lock().unwrap();
-            if now - lock.time < 300 {
+            // Relative mode clients have no absolute position to echo, so they
+            // need the real cursor position to keep their overlay in sync.
+            if now - lock.time < 300 && !is_relative_mouse_active(lock.conn) {
                 lock.conn
             } else {
                 0
