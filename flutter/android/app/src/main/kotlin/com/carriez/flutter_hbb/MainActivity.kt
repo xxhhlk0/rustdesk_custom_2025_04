@@ -69,7 +69,7 @@ class MainActivity : FlutterActivity() {
     private var relativeMouseRemainderY = 0f
     private var captureEventLogCount = 0
     private var captureReported = false
-    private var videoTextureId = -1
+    private var videoTextureId: Long = -1L
     private var videoSurfaceTexture: android.graphics.SurfaceTexture? = null
     private val captureRetry = Runnable {
         if (relativeMouseCaptureRequested) requestRelativeMouseCapture()
