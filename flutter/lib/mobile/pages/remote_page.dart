@@ -21,6 +21,7 @@ import '../../common/widgets/remote_input.dart';
 import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
+import '../../models/surface_decode.dart';
 import '../../utils/image.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
@@ -77,6 +78,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   Worker? _waylandKeyboardGateWorker;
   bool _waylandKeyboardGateInitialized = false;
+  bool _surfaceTried = false;
 
   InputModel get inputModel => gFFI.inputModel;
   SessionID get sessionId => gFFI.sessionId;
@@ -122,6 +124,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       }
       _disableAndroidSoftKeyboard(
           isKeyboardVisible: keyboardVisibilityController.isVisible);
+      if (isAndroid && !_surfaceTried) {
+        _surfaceTried = true;
+        SurfaceDecode.instance.setEnabled(true).then((ok) {
+          if (ok) {
+            SurfaceDecode.instance.markFirstFrameShown();
+            if (mounted) setState(() {});
+          }
+        });
+      }
     });
     WidgetsBinding.instance.addObserver(this);
 
@@ -162,6 +173,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     _physicalFocusNode.dispose();
     clearWaylandKeyboardPromptSuppressedForConnection(sessionId.toString());
     _waylandKeyboardGateWorker?.dispose();
+    if (_surfaceTried) {
+      SurfaceDecode.instance.setEnabled(false);
+    }
     inputModel.keyboardInputAllowed = true;
     await gFFI.close();
     _timer?.cancel();
@@ -674,7 +688,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         color: MyTheme.canvasColor,
         child: Stack(children: () {
           final paints = [
-            ImagePaint(ffiModel: gFFI.ffiModel),
+            Obx(() => SurfaceDecode.instance.enabled.value
+                ? const SurfacePaint()
+                : ImagePaint(ffiModel: gFFI.ffiModel)),
             Positioned(
               top: 10,
               right: 10,
@@ -1149,6 +1165,24 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
               (_fn ? fn : []) +
               (_more ? more : []),
         ));
+  }
+}
+
+class SurfacePaint extends StatelessWidget {
+  const SurfacePaint({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final c = Provider.of<CanvasModel>(context);
+    final s = c.scale;
+    final adjust = c.getAdjustY();
+    return Transform(
+      alignment: Alignment.topLeft,
+      transform: Matrix4.identity()
+        ..translate(c.x, c.y + adjust)
+        ..scale(s),
+      child: Texture(textureId: SurfaceDecode.instance.textureId),
+    );
   }
 }
 

@@ -16,6 +16,10 @@ struct SurfaceDecoder {
     pts: u64,
 }
 
+// The codec handle is only touched from the video decode thread behind the
+// decoder mutex.
+unsafe impl Send for SurfaceDecoder {}
+
 impl SurfaceDecoder {
     fn new(mime: &str, window: &NativeWindow) -> Option<Self> {
         let codec = MediaCodec::from_decoder_type(mime)?;
