@@ -664,7 +664,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   bool get showCursorPaint =>
       !gFFI.ffiModel.isPeerAndroid &&
       !gFFI.canvasModel.cursorEmbedded &&
-      !gFFI.inputModel.relativeMouseMode.value;
+      // Android hides the system pointer while relative mode owns the mouse,
+      // so the remote cursor has to stay visible.
+      (!gFFI.inputModel.relativeMouseMode.value || isAndroid);
 
   Widget getBodyForMobile() {
     final keyboardIsVisible = keyboardVisibilityController.isVisible;

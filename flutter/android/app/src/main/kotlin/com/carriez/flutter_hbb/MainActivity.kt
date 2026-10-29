@@ -125,7 +125,7 @@ class MainActivity : FlutterActivity() {
         if (hasFocus && relativeMouseCaptureRequested &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
         ) {
-            window?.decorView?.requestPointerCapture()
+            requestRelativeMouseCapture()
         }
     }
 
@@ -149,7 +149,8 @@ class MainActivity : FlutterActivity() {
 
     private fun enableRelativeMouseCapture(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
-        val view = window?.decorView ?: return false
+        // Capture must be requested on the focused view, which is the FlutterView.
+        val view = flutterView ?: return false
         relativeMouseRemainderX = 0f
         relativeMouseRemainderY = 0f
         relativeMouseCaptureRequested = true
@@ -158,20 +159,43 @@ class MainActivity : FlutterActivity() {
         }
         capturedPointerListener = listener
         view.setOnCapturedPointerListener(listener)
-        view.requestPointerCapture()
+        requestRelativeMouseCapture()
         return true
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun requestRelativeMouseCapture() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val view = flutterView ?: return
+        view.requestPointerCapture()
+        // The grant is asynchronous, report what the system actually did.
+        view.post { reportPointerCaptureState() }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun reportPointerCaptureState() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        try {
+            hostMethodChannel?.invokeMethod(
+                "onPointerCaptureChanged",
+                flutterView?.hasPointerCapture() == true
+            )
+        } catch (e: Exception) {
+            Log.w(logTag, "reportPointerCaptureState failed: ${e.message}")
+        }
     }
 
     private fun disableRelativeMouseCapture() {
         relativeMouseCaptureRequested = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            window?.decorView?.let { view ->
+            flutterView?.let { view ->
                 view.setOnCapturedPointerListener(null)
                 capturedPointerListener = null
                 if (view.hasPointerCapture()) {
                     view.releasePointerCapture()
                 }
             }
+            reportPointerCaptureState()
         }
     }
 
@@ -206,7 +230,46 @@ class MainActivity : FlutterActivity() {
         if (x != 0 || y != 0) {
             hostMethodChannel?.invokeMethod("onMouseDelta", mapOf("dx" to x, "dy" to y))
         }
+        when (event.actionMasked) {
+            MotionEvent.ACTION_BUTTON_PRESS ->
+                sendMouseButton(event.actionButton, true)
+            MotionEvent.ACTION_BUTTON_RELEASE ->
+                sendMouseButton(event.actionButton, false)
+            MotionEvent.ACTION_DOWN ->
+                sendMouseButton(MotionEvent.BUTTON_PRIMARY, true)
+            MotionEvent.ACTION_UP ->
+                sendMouseButton(MotionEvent.BUTTON_PRIMARY, false)
+            MotionEvent.ACTION_SCROLL -> sendMouseWheel(
+                event.getAxisValue(MotionEvent.AXIS_HSCROLL),
+                event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+            )
+        }
         return true
+    }
+
+    private fun sendMouseButton(button: Int, down: Boolean) {
+        if (button == 0) return
+        hostMethodChannel?.invokeMethod(
+            "onMouseButton",
+            mapOf("buttons" to button, "down" to down)
+        )
+    }
+
+    private fun sendMouseWheel(horizontal: Float, vertical: Float) {
+        // Android reports a positive axis as scrolling right/down, RustDesk
+        // expects the opposite sign.
+        val dx = when {
+            horizontal > 0 -> -1
+            horizontal < 0 -> 1
+            else -> 0
+        }
+        val dy = when {
+            vertical > 0 -> -1
+            vertical < 0 -> 1
+            else -> 0
+        }
+        if (dx == 0 && dy == 0) return
+        hostMethodChannel?.invokeMethod("onMouseWheel", mapOf("dx" to dx, "dy" to dy))
     }
 
     private fun requestMediaProjection() {

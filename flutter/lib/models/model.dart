@@ -3820,6 +3820,16 @@ class CursorModel with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Shift the known remote cursor by a relative movement. Used on Android
+  /// relative mode, where the server does not echo positions back to the
+  /// connection that just moved the cursor.
+  moveCursorBy(double dx, double dy) {
+    if (_x <= -10000 || _y <= -10000) return;
+    _x += dx;
+    _y += dy;
+    notifyListeners();
+  }
+
   updateDisplayOrigin(double x, double y, {updateCursorPos = true}) {
     _displayOriginX = x;
     _displayOriginY = y;
