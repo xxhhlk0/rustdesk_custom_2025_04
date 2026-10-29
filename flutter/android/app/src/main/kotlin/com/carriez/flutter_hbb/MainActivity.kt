@@ -67,6 +67,7 @@ class MainActivity : FlutterActivity() {
     private var relativeMouseRemainderX = 0f
     private var relativeMouseRemainderY = 0f
     private var captureEventLogCount = 0
+    private var captureReported = false
     private var capturedPointerListener: View.OnCapturedPointerListener? = null
     private sealed class PendingPicker {
         data class ImportFiles(val result: MethodChannel.Result) : PendingPicker()
@@ -172,6 +173,7 @@ class MainActivity : FlutterActivity() {
         relativeMouseRemainderX = 0f
         relativeMouseRemainderY = 0f
         captureEventLogCount = 0
+        captureReported = false
         relativeMouseCaptureRequested = true
         val listener = View.OnCapturedPointerListener { _, event ->
             handleCapturedPointerEvent(event)
@@ -194,11 +196,13 @@ class MainActivity : FlutterActivity() {
     @RequiresApi(Build.VERSION_CODES.O)
     private fun reportPointerCaptureState() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        // Only report a granted capture: the request is asynchronous and an
+        // early check would clear the pending state on the Dart side.
+        if (captureTargetView()?.hasPointerCapture() != true) return
+        if (captureReported) return
+        captureReported = true
         try {
-            hostMethodChannel?.invokeMethod(
-                "onPointerCaptureChanged",
-                captureTargetView()?.hasPointerCapture() == true
-            )
+            hostMethodChannel?.invokeMethod("onPointerCaptureChanged", true)
         } catch (e: Exception) {
             Log.w(logTag, "reportPointerCaptureState failed: ${e.message}")
         }
@@ -206,6 +210,7 @@ class MainActivity : FlutterActivity() {
 
     private fun disableRelativeMouseCapture() {
         relativeMouseCaptureRequested = false
+        captureReported = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             captureTargetView()?.let { view ->
                 view.setOnCapturedPointerListener(null)
@@ -220,6 +225,16 @@ class MainActivity : FlutterActivity() {
 
     private fun handleCapturedPointerEvent(event: MotionEvent): Boolean {
         if (!relativeMouseCaptureRequested) return false
+        // A captured event proves the system granted the capture, which can
+        // happen after the asynchronous state check ran.
+        if (!captureReported) {
+            captureReported = true
+            try {
+                hostMethodChannel?.invokeMethod("onPointerCaptureChanged", true)
+            } catch (e: Exception) {
+                Log.w(logTag, "report capture failed: ${e.message}")
+            }
+        }
         val source = event.source
         // Some devices keep reporting SOURCE_MOUSE after capture; axes are
         // relative in that state, so accept it as well.

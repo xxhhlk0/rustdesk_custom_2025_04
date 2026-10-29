@@ -57,6 +57,7 @@ class RelativeMouseModel {
   // The model waiting for the system to confirm pointer capture.
   static RelativeMouseModel? _pendingNativeModel;
   static bool _hostChannelInitialized = false;
+  static int _nativeLogCount = 0;
 
   /// Initialize the host channel for native relative mouse mode.
   /// This should be called once when the app starts on macOS or Android.
@@ -70,6 +71,11 @@ class RelativeMouseModel {
       final method = call.method;
       if (method == 'onMouseDelta') {
         final args = call.arguments as Map<dynamic, dynamic>;
+        if (_nativeLogCount < 10) {
+          _nativeLogCount++;
+          debugPrint('[RelMouse] delta ${args['dx']},${args['dy']} '
+              'model=${_activeNativeModel != null}');
+        }
         _activeNativeModel?._onNativeMouseDelta(
             args['dx'] as int, args['dy'] as int);
       } else if (method == 'onMouseButton') {
