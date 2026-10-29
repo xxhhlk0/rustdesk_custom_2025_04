@@ -33,11 +33,13 @@ import android.util.DisplayMetrics
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import androidx.annotation.RequiresApi
 import org.json.JSONArray
 import org.json.JSONObject
 import com.hjq.permissions.XXPermissions
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterView
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlin.concurrent.thread
@@ -147,10 +149,25 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun captureTargetView(): View? {
+        val root = findViewById<ViewGroup>(android.R.id.content) ?: return null
+        return findFlutterView(root)
+    }
+
+    private fun findFlutterView(view: View): View? {
+        if (view is FlutterView) return view
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                findFlutterView(view.getChildAt(i))?.let { return it }
+            }
+        }
+        return null
+    }
+
     private fun enableRelativeMouseCapture(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
         // Capture must be requested on the focused view, which is the FlutterView.
-        val view = flutterView ?: return false
+        val view = captureTargetView() ?: return false
         relativeMouseRemainderX = 0f
         relativeMouseRemainderY = 0f
         relativeMouseCaptureRequested = true
@@ -166,7 +183,7 @@ class MainActivity : FlutterActivity() {
     @RequiresApi(Build.VERSION_CODES.O)
     private fun requestRelativeMouseCapture() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val view = flutterView ?: return
+        val view = captureTargetView() ?: return
         view.requestPointerCapture()
         // The grant is asynchronous, report what the system actually did.
         view.post { reportPointerCaptureState() }
@@ -178,7 +195,7 @@ class MainActivity : FlutterActivity() {
         try {
             hostMethodChannel?.invokeMethod(
                 "onPointerCaptureChanged",
-                flutterView?.hasPointerCapture() == true
+                captureTargetView()?.hasPointerCapture() == true
             )
         } catch (e: Exception) {
             Log.w(logTag, "reportPointerCaptureState failed: ${e.message}")
@@ -188,7 +205,7 @@ class MainActivity : FlutterActivity() {
     private fun disableRelativeMouseCapture() {
         relativeMouseCaptureRequested = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            flutterView?.let { view ->
+            captureTargetView()?.let { view ->
                 view.setOnCapturedPointerListener(null)
                 capturedPointerListener = null
                 if (view.hasPointerCapture()) {
