@@ -742,6 +742,20 @@ impl Decoder {
             #[cfg(any(feature = "hwcodec", feature = "vram"))]
             video_frame::Union::H264s(h264s) => {
                 *chroma = Some(Chroma::I420);
+                #[cfg(target_os = "android")]
+                if super::mediacodec_surface::enabled() {
+                    let mut rendered = false;
+                    for frame in h264s.frames.iter() {
+                        if !super::mediacodec_surface::decode_h264(&frame.data)? {
+                            break;
+                        }
+                        rendered = true;
+                    }
+                    if rendered {
+                        *_pixelbuffer = false;
+                        return Ok(true);
+                    }
+                }
                 #[cfg(feature = "vram")]
                 if let Some(decoder) = &mut self.h264_vram {
                     *_pixelbuffer = false;
@@ -756,6 +770,20 @@ impl Decoder {
             #[cfg(any(feature = "hwcodec", feature = "vram"))]
             video_frame::Union::H265s(h265s) => {
                 *chroma = Some(Chroma::I420);
+                #[cfg(target_os = "android")]
+                if super::mediacodec_surface::enabled() {
+                    let mut rendered = false;
+                    for frame in h265s.frames.iter() {
+                        if !super::mediacodec_surface::decode_h265(&frame.data)? {
+                            break;
+                        }
+                        rendered = true;
+                    }
+                    if rendered {
+                        *_pixelbuffer = false;
+                        return Ok(true);
+                    }
+                }
                 #[cfg(feature = "vram")]
                 if let Some(decoder) = &mut self.h265_vram {
                     *_pixelbuffer = false;

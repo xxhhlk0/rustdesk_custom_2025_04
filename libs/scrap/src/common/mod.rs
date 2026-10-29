@@ -44,6 +44,8 @@ pub mod convert;
 pub mod hwcodec;
 #[cfg(feature = "mediacodec")]
 pub mod mediacodec;
+#[cfg(target_os = "android")]
+pub mod mediacodec_surface;
 pub mod vpxcodec;
 #[cfg(feature = "vram")]
 pub mod vram;

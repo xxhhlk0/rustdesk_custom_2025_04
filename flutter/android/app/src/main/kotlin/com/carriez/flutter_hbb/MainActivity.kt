@@ -146,11 +146,17 @@ class MainActivity : FlutterActivity() {
             videoSurfaceTexture = entry.surfaceTexture()
             videoTextureId = entry.id()
             videoSurfaceTexture?.setDefaultBufferSize(2560, 1440)
-            FFI.setVideoSurface(Surface(videoSurfaceTexture))
             Log.i(logTag, "video texture ready: $videoTextureId")
         } catch (e: Exception) {
             Log.e(logTag, "initVideoTexture failed: ${e.message}")
         }
+    }
+
+    private fun setSurfaceDecode(enable: Boolean): Boolean {
+        val texture = videoSurfaceTexture ?: return false
+        FFI.setVideoSurface(if (enable) Surface(texture) else null)
+        Log.i(logTag, "surface decode: $enable")
+        return enable
     }
 
     private fun initHostChannel(flutterEngine: FlutterEngine) {        hostMethodChannel = MethodChannel(
@@ -165,6 +171,9 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "getVideoTextureId" -> result.success(videoTextureId)
+                    "setSurfaceDecode" -> result.success(
+                        setSurfaceDecode(call.arguments == true)
+                    )
                     else -> result.notImplemented()
                 }
             }
