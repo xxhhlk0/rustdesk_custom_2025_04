@@ -3055,4 +3055,42 @@ pub mod server_side {
     ) -> jboolean {
         jboolean::from(crate::server::is_clipboard_service_ok())
     }
+
+    static VIDEO_SURFACE: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    extern "C" {
+        fn ANativeWindow_fromSurface(
+            env: *mut jni::sys::JNIEnv,
+            surface: jni::sys::jobject,
+        ) -> *mut std::ffi::c_void;
+        fn ANativeWindow_release(window: *mut std::ffi::c_void);
+    }
+
+    pub fn video_surface() -> usize {
+        VIDEO_SURFACE.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_setVideoSurface(
+        env: JNIEnv,
+        _class: JClass,
+        surface: JObject,
+    ) {
+        let old = VIDEO_SURFACE.swap(0, std::sync::atomic::Ordering::SeqCst);
+        if old != 0 {
+            ANativeWindow_release(old as *mut std::ffi::c_void);
+        }
+        if !surface.is_null() {
+            let window =
+                ANativeWindow_fromSurface(env.get_native_interface(), surface.into_raw());
+            if !window.is_null() {
+                VIDEO_SURFACE.store(
+                    window as usize,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                log::info!("video surface ready");
+            }
+        }
+    }
 }

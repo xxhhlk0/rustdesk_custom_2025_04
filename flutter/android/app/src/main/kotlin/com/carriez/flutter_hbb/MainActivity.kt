@@ -19,6 +19,7 @@ import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.view.Surface
 import android.view.WindowManager
 import android.media.MediaCodecInfo
 import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
@@ -68,6 +69,8 @@ class MainActivity : FlutterActivity() {
     private var relativeMouseRemainderY = 0f
     private var captureEventLogCount = 0
     private var captureReported = false
+    private var videoTextureId = -1
+    private var videoSurfaceTexture: android.graphics.SurfaceTexture? = null
     private val captureRetry = Runnable {
         if (relativeMouseCaptureRequested) requestRelativeMouseCapture()
     }
@@ -106,6 +109,7 @@ class MainActivity : FlutterActivity() {
         )
         initFlutterChannel(flutterMethodChannel!!)
         initHostChannel(flutterEngine)
+        initVideoTexture(flutterEngine)
         thread {
             try {
                 setCodecInfo()
@@ -136,8 +140,20 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun initHostChannel(flutterEngine: FlutterEngine) {
-        hostMethodChannel = MethodChannel(
+    private fun initVideoTexture(flutterEngine: FlutterEngine) {
+        try {
+            val entry = flutterEngine.renderer.createSurfaceTexture()
+            videoSurfaceTexture = entry.surfaceTexture()
+            videoTextureId = entry.id()
+            videoSurfaceTexture?.setDefaultBufferSize(2560, 1440)
+            FFI.setVideoSurface(Surface(videoSurfaceTexture))
+            Log.i(logTag, "video texture ready: $videoTextureId")
+        } catch (e: Exception) {
+            Log.e(logTag, "initVideoTexture failed: ${e.message}")
+        }
+    }
+
+    private fun initHostChannel(flutterEngine: FlutterEngine) {        hostMethodChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "org.rustdesk.rustdesk/host"
         ).also { channel ->
@@ -148,6 +164,7 @@ class MainActivity : FlutterActivity() {
                         disableRelativeMouseCapture()
                         result.success(true)
                     }
+                    "getVideoTextureId" -> result.success(videoTextureId)
                     else -> result.notImplemented()
                 }
             }
