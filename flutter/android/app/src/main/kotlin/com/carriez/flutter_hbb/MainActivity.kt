@@ -187,6 +187,8 @@ class MainActivity : FlutterActivity() {
         // The first request can race with window focus; retry until granted.
         view.postDelayed(captureRetry, 300)
         view.postDelayed(captureRetry, 1000)
+        view.postDelayed(captureRetry, 2000)
+        view.postDelayed(captureRetry, 3000)
         return true
     }
 

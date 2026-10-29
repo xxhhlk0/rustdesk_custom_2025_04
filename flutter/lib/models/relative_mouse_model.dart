@@ -100,11 +100,6 @@ class RelativeMouseModel {
   // if high-polling mice (e.g. 1000Hz+) cause message flooding on the network.
   void _onNativeMouseDelta(int dx, int dy) {
     if (!enabled.value) return;
-    // The server does not echo cursor positions back to the connection that
-    // just moved it, so keep the local copy in sync for CursorPaint.
-    if (isAndroid) {
-      gFFI.cursorModel.moveCursorBy(dx.toDouble(), dy.toDouble());
-    }
     // Send directly to remote without accumulator (native already provides integer deltas)
     _sendMouseMessageToSession({
       'type': 'move_relative',
