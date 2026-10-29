@@ -66,6 +66,7 @@ class MainActivity : FlutterActivity() {
     private var relativeMouseCaptureRequested = false
     private var relativeMouseRemainderX = 0f
     private var relativeMouseRemainderY = 0f
+    private var captureEventLogCount = 0
     private var capturedPointerListener: View.OnCapturedPointerListener? = null
     private sealed class PendingPicker {
         data class ImportFiles(val result: MethodChannel.Result) : PendingPicker()
@@ -170,6 +171,7 @@ class MainActivity : FlutterActivity() {
         val view = captureTargetView() ?: return false
         relativeMouseRemainderX = 0f
         relativeMouseRemainderY = 0f
+        captureEventLogCount = 0
         relativeMouseCaptureRequested = true
         val listener = View.OnCapturedPointerListener { _, event ->
             handleCapturedPointerEvent(event)
@@ -218,18 +220,33 @@ class MainActivity : FlutterActivity() {
 
     private fun handleCapturedPointerEvent(event: MotionEvent): Boolean {
         if (!relativeMouseCaptureRequested) return false
+        val source = event.source
+        // Some devices keep reporting SOURCE_MOUSE after capture; axes are
+        // relative in that state, so accept it as well.
+        val isRelative = source == InputDevice.SOURCE_MOUSE_RELATIVE ||
+            source == InputDevice.SOURCE_TOUCHPAD ||
+            source == InputDevice.SOURCE_MOUSE
+        if (!isRelative) return false
+        if (captureEventLogCount < 5) {
+            captureEventLogCount++
+            Log.d(
+                logTag,
+                "captured source=$source action=${event.actionMasked} " +
+                    "x=${event.getAxisValue(MotionEvent.AXIS_X)} " +
+                    "y=${event.getAxisValue(MotionEvent.AXIS_Y)} " +
+                    "rx=${event.getAxisValue(MotionEvent.AXIS_RELATIVE_X)} " +
+                    "ry=${event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)} " +
+                    "buttons=${event.buttonState}"
+            )
+        }
         val axisX: Int
         val axisY: Int
-        when (event.source) {
-            InputDevice.SOURCE_MOUSE_RELATIVE -> {
-                axisX = MotionEvent.AXIS_X
-                axisY = MotionEvent.AXIS_Y
-            }
-            InputDevice.SOURCE_TOUCHPAD -> {
-                axisX = MotionEvent.AXIS_RELATIVE_X
-                axisY = MotionEvent.AXIS_RELATIVE_Y
-            }
-            else -> return false
+        if (source == InputDevice.SOURCE_TOUCHPAD) {
+            axisX = MotionEvent.AXIS_RELATIVE_X
+            axisY = MotionEvent.AXIS_RELATIVE_Y
+        } else {
+            axisX = MotionEvent.AXIS_X
+            axisY = MotionEvent.AXIS_Y
         }
         var dx = event.getAxisValue(axisX)
         var dy = event.getAxisValue(axisY)
