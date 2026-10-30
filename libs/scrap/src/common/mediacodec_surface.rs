@@ -1,7 +1,6 @@
 use hbb_common::{log, ResultType};
 use ndk::media::media_codec::{MediaCodec, MediaCodecDirection, MediaFormat};
 use ndk::native_window::NativeWindow;
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,7 +41,7 @@ impl SurfaceDecoder {
             let len = data.len();
             let buf = input.buffer_mut();
             if len <= buf.len() {
-                buf[..len].write_all(data)?;
+                buf[..len].copy_from_slice(data);
                 self.pts += 10_000;
                 self.codec
                     .queue_input_buffer(input, 0, len, self.pts, 0)?;
