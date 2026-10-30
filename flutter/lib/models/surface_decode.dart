@@ -66,8 +66,10 @@ class SurfaceDecode {
   }
 
   Future<bool> _waitForFrame() async {
-    for (var i = 0; i < 6; i++) {
-      await Future.delayed(const Duration(milliseconds: 300));
+    // SPS/PPS only ride on key frames, so give the stream time to reach the
+    // next IDR before giving up on the surface path.
+    for (var i = 0; i < 30; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
       try {
         final ready = await _channel.invokeMethod('isSurfaceFrameReady');
         if (ready == true) return true;
