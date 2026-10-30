@@ -30,4 +30,5 @@ object FFI {
     external fun onClipboardUpdate(clips: ByteBuffer)
     external fun isServiceClipboardEnabled(): Boolean
     external fun setVideoSurface(surface: Surface?)
+    external fun isSurfaceFrameReady(): Boolean
 }

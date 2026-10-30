@@ -3067,4 +3067,12 @@ pub mod server_side {
             surface.as_raw(),
         );
     }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_isSurfaceFrameReady(
+        _env: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        jboolean::from(scrap::mediacodec_surface::frame_rendered())
+    }
 }

@@ -174,6 +174,7 @@ class MainActivity : FlutterActivity() {
                     "setSurfaceDecode" -> result.success(
                         setSurfaceDecode(call.arguments == true)
                     )
+                    "isSurfaceFrameReady" -> result.success(FFI.isSurfaceFrameReady())
                     else -> result.notImplemented()
                 }
             }

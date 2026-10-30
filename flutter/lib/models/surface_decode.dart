@@ -30,20 +30,52 @@ class SurfaceDecode {
 
   Future<bool> setEnabled(bool value) async {
     if (!isAndroid) return false;
+    if (!value) {
+      enabled.value = false;
+      try {
+        await _channel.invokeMethod('setSurfaceDecode', false);
+      } catch (_) {}
+      return false;
+    }
     await init();
     if (textureId < 0) {
       enabled.value = false;
       return false;
     }
     try {
-      final ok = await _channel.invokeMethod('setSurfaceDecode', value);
-      enabled.value = ok == true && value;
-      return enabled.value;
+      final ok = await _channel.invokeMethod('setSurfaceDecode', true);
+      if (ok != true) {
+        enabled.value = false;
+        return false;
+      }
+      // Only switch the UI over once the codec really produced a frame,
+      // otherwise the texture would stay black.
+      if (!await _waitForFrame()) {
+        debugPrint('[Surface] no frame in time, falling back');
+        await _channel.invokeMethod('setSurfaceDecode', false);
+        enabled.value = false;
+        return false;
+      }
+      enabled.value = true;
+      return true;
     } catch (e) {
       debugPrint('[Surface] setSurfaceDecode failed: $e');
       enabled.value = false;
       return false;
     }
+  }
+
+  Future<bool> _waitForFrame() async {
+    for (var i = 0; i < 6; i++) {
+      await Future.delayed(const Duration(milliseconds: 300));
+      try {
+        final ready = await _channel.invokeMethod('isSurfaceFrameReady');
+        if (ready == true) return true;
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
   }
 
   void markFirstFrameShown() {

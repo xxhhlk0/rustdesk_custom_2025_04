@@ -9,6 +9,12 @@ const H265_MIME_TYPE: &str = "video/hevc";
 
 static WINDOW: Mutex<Option<Arc<NativeWindow>>> = Mutex::new(None);
 static DECODER: Mutex<Option<(String, SurfaceDecoder)>> = Mutex::new(None);
+static FRAME_RENDERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True once a decoded frame has been handed to the surface.
+pub fn frame_rendered() -> bool {
+    FRAME_RENDERED.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 struct SurfaceDecoder {
     codec: MediaCodec,
@@ -54,6 +60,7 @@ impl SurfaceDecoder {
         }
         while let Some(out) = self.codec.dequeue_output_buffer(Duration::from_millis(1))? {
             self.codec.release_output_buffer(out, true)?;
+            FRAME_RENDERED.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(())
     }
@@ -67,6 +74,7 @@ pub fn set_window_from_java(env: *mut jni::sys::JNIEnv, surface: jni::sys::jobje
     };
     *WINDOW.lock().unwrap() = window.map(Arc::new);
     *DECODER.lock().unwrap() = None;
+    FRAME_RENDERED.store(false, std::sync::atomic::Ordering::SeqCst);
     log::info!("video surface {}", if surface.is_null() { "cleared" } else { "set" });
 }
 
@@ -92,7 +100,12 @@ fn decode(mime: &str, data: &[u8]) -> ResultType<bool> {
     if lock.as_ref().map(|(m, _)| m != mime).unwrap_or(true) {
         let csd = extract_csd(data, is_h265);
         if csd.is_empty() {
-            log::debug!("surface decoder waits for SPS/PPS");
+            static PROBED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !PROBED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let n = data.len().min(32);
+                log::info!("surface probe len={} head={:02x?}", data.len(), &data[..n]);
+            }
             return Ok(false);
         }
         match SurfaceDecoder::new(mime, &window, &csd) {
@@ -106,8 +119,25 @@ fn decode(mime: &str, data: &[u8]) -> ResultType<bool> {
     Ok(true)
 }
 
-/// Collect the parameter sets of an Annex-B frame as MediaCodec csd buffers.
+/// Collect the parameter sets of a frame as MediaCodec csd buffers. Handles
+/// both Annex-B start codes and length-prefixed (AVCC) NAL units.
 fn extract_csd(data: &[u8], is_h265: bool) -> Vec<Vec<u8>> {
+    let annexb = extract_annexb_csd(data, is_h265);
+    if !annexb.is_empty() {
+        return annexb;
+    }
+    extract_avcc_csd(data, is_h265)
+}
+
+fn keep_nal(nal_type: u8, is_h265: bool) -> bool {
+    if is_h265 {
+        matches!(nal_type, 32..=34)
+    } else {
+        matches!(nal_type, 7 | 8)
+    }
+}
+
+fn extract_annexb_csd(data: &[u8], is_h265: bool) -> Vec<Vec<u8>> {
     let mut result = Vec::new();
     let mut current: Option<(u8, usize)> = None;
     let mut i = 0;
@@ -127,7 +157,9 @@ fn extract_csd(data: &[u8], is_h265: bool) -> Vec<Vec<u8>> {
         match start_len {
             Some(len) => {
                 if let Some((nal_type, start)) = current {
-                    push_csd(&mut result, data, start..i, nal_type, is_h265);
+                    if keep_nal(nal_type, is_h265) {
+                        result.push(data[start..i].to_vec());
+                    }
                 }
                 let header = i + len;
                 if header < data.len() {
@@ -147,24 +179,33 @@ fn extract_csd(data: &[u8], is_h265: bool) -> Vec<Vec<u8>> {
         }
     }
     if let Some((nal_type, start)) = current {
-        push_csd(&mut result, data, start..data.len(), nal_type, is_h265);
+        if keep_nal(nal_type, is_h265) {
+            result.push(data[start..data.len()].to_vec());
+        }
     }
     result
 }
 
-fn push_csd(
-    result: &mut Vec<Vec<u8>>,
-    data: &[u8],
-    range: std::ops::Range<usize>,
-    nal_type: u8,
-    is_h265: bool,
-) {
-    let keep = if is_h265 {
-        matches!(nal_type, 32..=34)
-    } else {
-        matches!(nal_type, 7 | 8)
-    };
-    if keep {
-        result.push(data[range].to_vec());
+fn extract_avcc_csd(data: &[u8], is_h265: bool) -> Vec<Vec<u8>> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i + 4 <= data.len() {
+        let len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+        if len == 0 || i + 4 + len > data.len() {
+            break;
+        }
+        let nal = &data[i + 4..i + 4 + len];
+        let nal_type = if is_h265 {
+            (nal[0] >> 1) & 0x3f
+        } else {
+            nal[0] & 0x1f
+        };
+        if keep_nal(nal_type, is_h265) {
+            let mut with_sc = vec![0u8, 0, 0, 1];
+            with_sc.extend_from_slice(nal);
+            result.push(with_sc);
+        }
+        i += 4 + len;
     }
+    result
 }
