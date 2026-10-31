@@ -3820,6 +3820,16 @@ class CursorModel with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Shift the known remote cursor by a relative movement. The server may not
+  /// echo positions back to the connection that moved the cursor, so the
+  /// overlay keeps its own copy in sync until an authoritative update lands.
+  moveCursorBy(double dx, double dy) {
+    if (_x <= -10000 || _y <= -10000) return;
+    _x += dx;
+    _y += dy;
+    notifyListeners();
+  }
+
   updateDisplayOrigin(double x, double y, {updateCursorPos = true}) {
     _displayOriginX = x;
     _displayOriginY = y;
