@@ -152,10 +152,13 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun setSurfaceDecode(enable: Boolean): Boolean {
+    private fun setSurfaceDecode(enable: Boolean, width: Int, height: Int): Boolean {
         val texture = videoSurfaceTexture ?: return false
+        if (enable && width > 0 && height > 0) {
+            texture.setDefaultBufferSize(width, height)
+        }
         FFI.setVideoSurface(if (enable) Surface(texture) else null)
-        Log.i(logTag, "surface decode: $enable")
+        Log.i(logTag, "surface decode: $enable ${width}x${height}")
         return enable
     }
 
@@ -172,7 +175,11 @@ class MainActivity : FlutterActivity() {
                     }
                     "getVideoTextureId" -> result.success(videoTextureId)
                     "setSurfaceDecode" -> result.success(
-                        setSurfaceDecode(call.arguments == true)
+                        setSurfaceDecode(
+                            call.argument<Boolean>("enable") == true,
+                            call.argument<Int>("width") ?: 0,
+                            call.argument<Int>("height") ?: 0
+                        )
                     )
                     "isSurfaceFrameReady" -> result.success(FFI.isSurfaceFrameReady())
                     else -> result.notImplemented()

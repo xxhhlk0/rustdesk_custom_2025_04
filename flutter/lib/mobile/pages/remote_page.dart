@@ -126,7 +126,12 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           isKeyboardVisible: keyboardVisibilityController.isVisible);
       if (isAndroid && !_surfaceTried) {
         _surfaceTried = true;
-        SurfaceDecode.instance.setEnabled(true).then((ok) {
+        final displays = gFFI.ffiModel.pi.getCurDisplays();
+        final w = displays.isNotEmpty ? displays[0].width : 0;
+        final h = displays.isNotEmpty ? displays[0].height : 0;
+        SurfaceDecode.instance
+            .setEnabled(true, width: w, height: h)
+            .then((ok) {
           if (ok) {
             SurfaceDecode.instance.markFirstFrameShown();
             if (mounted) setState(() {});
@@ -689,7 +694,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         child: Stack(children: () {
           final paints = [
             Obx(() => SurfaceDecode.instance.enabled.value
-                ? const SurfacePaint()
+                ? SurfacePaint(ffiModel: gFFI.ffiModel)
                 : ImagePaint(ffiModel: gFFI.ffiModel)),
             Positioned(
               top: 10,
@@ -1169,19 +1174,31 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
 }
 
 class SurfacePaint extends StatelessWidget {
-  const SurfacePaint({Key? key}) : super(key: key);
+  final FfiModel ffiModel;
+  const SurfacePaint({Key? key, required this.ffiModel}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     final c = Provider.of<CanvasModel>(context);
     final s = c.scale;
     final adjust = c.getAdjustY();
+    final displays = ffiModel.pi.getCurDisplays();
+    final w = displays.isNotEmpty && displays[0].width > 0
+        ? displays[0].width.toDouble()
+        : 2560.0;
+    final h = displays.isNotEmpty && displays[0].height > 0
+        ? displays[0].height.toDouble()
+        : 1440.0;
     return Transform(
       alignment: Alignment.topLeft,
       transform: Matrix4.identity()
         ..translate(c.x, c.y + adjust)
         ..scale(s),
-      child: Texture(textureId: SurfaceDecode.instance.textureId),
+      child: SizedBox(
+        width: w,
+        height: h,
+        child: Texture(textureId: SurfaceDecode.instance.textureId),
+      ),
     );
   }
 }

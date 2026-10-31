@@ -28,12 +28,12 @@ class SurfaceDecode {
     }
   }
 
-  Future<bool> setEnabled(bool value) async {
+  Future<bool> setEnabled(bool value, {int width = 0, int height = 0}) async {
     if (!isAndroid) return false;
     if (!value) {
       enabled.value = false;
       try {
-        await _channel.invokeMethod('setSurfaceDecode', false);
+        await _channel.invokeMethod('setSurfaceDecode', {'enable': false});
       } catch (_) {}
       return false;
     }
@@ -43,7 +43,11 @@ class SurfaceDecode {
       return false;
     }
     try {
-      final ok = await _channel.invokeMethod('setSurfaceDecode', true);
+      final ok = await _channel.invokeMethod('setSurfaceDecode', {
+        'enable': true,
+        'width': width,
+        'height': height,
+      });
       if (ok != true) {
         enabled.value = false;
         return false;
@@ -52,7 +56,7 @@ class SurfaceDecode {
       // otherwise the texture would stay black.
       if (!await _waitForFrame()) {
         debugPrint('[Surface] no frame in time, falling back');
-        await _channel.invokeMethod('setSurfaceDecode', false);
+        await _channel.invokeMethod('setSurfaceDecode', {'enable': false});
         enabled.value = false;
         return false;
       }
