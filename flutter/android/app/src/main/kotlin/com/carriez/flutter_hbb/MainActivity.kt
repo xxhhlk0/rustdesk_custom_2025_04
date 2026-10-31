@@ -215,6 +215,7 @@ class MainActivity : FlutterActivity() {
         }
         capturedPointerListener = listener
         view.setOnCapturedPointerListener(listener)
+        Log.i(logTag, "enableRelativeMouseCapture view=${view.javaClass.simpleName}")
         requestRelativeMouseCapture()
         // The first request can race with window focus; retry until granted.
         view.postDelayed(captureRetry, 300)
@@ -232,6 +233,7 @@ class MainActivity : FlutterActivity() {
         // has actually been dropped, and skipping the call then loses the mouse
         // for good. Re-requesting is harmless when it is already granted.
         view.requestPointerCapture()
+        Log.i(logTag, "requestPointerCapture hasCapture=${view.hasPointerCapture()} focus=${view.hasWindowFocus()}")
         // The grant is asynchronous, report what the system actually did.
         view.post { reportPointerCaptureState() }
     }

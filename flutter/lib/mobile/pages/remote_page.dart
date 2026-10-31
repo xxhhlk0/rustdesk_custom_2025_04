@@ -1182,16 +1182,22 @@ class SurfacePaint extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final m = Provider.of<ImageModel>(context);
     final c = Provider.of<CanvasModel>(context);
     final s = c.scale;
     final adjust = c.getAdjustY();
     return Obx(() {
-      var w = 0.0;
-      var h = 0.0;
-      final parts = SurfaceDecode.instance.size.value.split('x');
-      if (parts.length == 2) {
-        w = double.tryParse(parts[0]) ?? 0;
-        h = double.tryParse(parts[1]) ?? 0;
+      // Prefer the size of the last decoded frame: the canvas scale was
+      // computed against it, so laying the texture out with anything else
+      // makes the picture shrink.
+      var w = m.image?.width.toDouble() ?? 0;
+      var h = m.image?.height.toDouble() ?? 0;
+      if (w <= 0 || h <= 0) {
+        final parts = SurfaceDecode.instance.size.value.split('x');
+        if (parts.length == 2) {
+          w = double.tryParse(parts[0]) ?? 0;
+          h = double.tryParse(parts[1]) ?? 0;
+        }
       }
       if (w <= 0 || h <= 0) {
         final displays = ffiModel.pi.getCurDisplays();
