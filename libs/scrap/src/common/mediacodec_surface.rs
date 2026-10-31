@@ -27,22 +27,55 @@ unsafe impl Send for SurfaceDecoder {}
 
 impl SurfaceDecoder {
     fn new(mime: &str, window: &NativeWindow, csd: &[Vec<u8>]) -> Option<Self> {
-        let codec = MediaCodec::from_decoder_type(mime)?;
-        let format = MediaFormat::new();
-        format.set_str("mime", mime);
-        for (i, unit) in csd.iter().enumerate() {
-            format.set_buffer(&format!("csd-{}", i), unit);
+        let w = if window.width() > 0 {
+            window.width()
+        } else {
+            2560
+        };
+        let h = if window.height() > 0 {
+            window.height()
+        } else {
+            1440
+        };
+        // Device codecs differ in what they accept for csd: Annex-B parameter
+        // sets, AVCC (no start code) or a single merged buffer. Try the common
+        // layouts instead of guessing one.
+        for variant in 0..3 {
+            let units: Vec<Vec<u8>> = match variant {
+                0 => csd.to_vec(),
+                1 => csd.iter().map(|u| strip_start_code(u)).collect(),
+                _ => vec![csd.concat()],
+            };
+            let codec = match MediaCodec::from_decoder_type(mime) {
+                Some(c) => c,
+                None => return None,
+            };
+            let format = MediaFormat::new();
+            format.set_str("mime", mime);
+            format.set_i32("width", w);
+            format.set_i32("height", h);
+            for (i, unit) in units.iter().enumerate() {
+                format.set_buffer(&format!("csd-{}", i), unit);
+            }
+            match codec.configure(&format, Some(window), MediaCodecDirection::Decoder) {
+                Ok(()) => match codec.start() {
+                    Ok(()) => {
+                        log::info!(
+                            "surface decoder started: {} variant={} csd={} size={}x{}",
+                            mime,
+                            variant,
+                            units.len(),
+                            w,
+                            h
+                        );
+                        return Some(Self { codec, pts: 0 });
+                    }
+                    Err(e) => log::error!("surface start failed variant={}: {:?}", variant, e),
+                },
+                Err(e) => log::error!("surface configure failed variant={}: {:?}", variant, e),
+            }
         }
-        if let Err(e) = codec.configure(&format, Some(window), MediaCodecDirection::Decoder) {
-            log::error!("surface decoder configure failed: {:?}", e);
-            return None;
-        }
-        if let Err(e) = codec.start() {
-            log::error!("surface decoder start failed: {:?}", e);
-            return None;
-        }
-        log::info!("surface decoder started: {} csd={}", mime, csd.len());
-        Some(Self { codec, pts: 0 })
+        None
     }
 
     fn decode(&mut self, data: &[u8]) -> ResultType<()> {
@@ -129,8 +162,17 @@ fn extract_csd(data: &[u8], is_h265: bool) -> Vec<Vec<u8>> {
     extract_avcc_csd(data, is_h265)
 }
 
-fn keep_nal(nal_type: u8, is_h265: bool) -> bool {
-    if is_h265 {
+fn strip_start_code(unit: &[u8]) -> Vec<u8> {
+    if unit.starts_with(&[0, 0, 0, 1]) {
+        unit[4..].to_vec()
+    } else if unit.starts_with(&[0, 0, 1]) {
+        unit[3..].to_vec()
+    } else {
+        unit.to_vec()
+    }
+}
+
+fn keep_nal(nal_type: u8, is_h265: bool) -> bool {    if is_h265 {
         matches!(nal_type, 32..=34)
     } else {
         matches!(nal_type, 7 | 8)
