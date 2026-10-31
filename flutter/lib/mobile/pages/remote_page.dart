@@ -126,6 +126,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           isKeyboardVisible: keyboardVisibilityController.isVisible);
       if (isAndroid && !_surfaceTried) {
         _surfaceTried = true;
+        // Ask for a key frame so the surface decoder gets SPS/PPS right away
+        // instead of waiting for the next natural IDR.
+        sessionRefreshVideo(sessionId, gFFI.ffiModel.pi);
         final displays = gFFI.ffiModel.pi.getCurDisplays();
         final w = displays.isNotEmpty ? displays[0].width : 0;
         final h = displays.isNotEmpty ? displays[0].height : 0;
