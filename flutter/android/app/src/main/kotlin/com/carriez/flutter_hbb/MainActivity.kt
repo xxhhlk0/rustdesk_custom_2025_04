@@ -154,9 +154,6 @@ class MainActivity : FlutterActivity() {
 
     private fun setSurfaceDecode(enable: Boolean, width: Int, height: Int): Boolean {
         val texture = videoSurfaceTexture ?: return false
-        if (enable && width > 0 && height > 0) {
-            texture.setDefaultBufferSize(width, height)
-        }
         FFI.setVideoSurface(if (enable) Surface(texture) else null)
         Log.i(logTag, "surface decode: $enable ${width}x${height}")
         return enable
@@ -182,6 +179,7 @@ class MainActivity : FlutterActivity() {
                         )
                     )
                     "isSurfaceFrameReady" -> result.success(FFI.isSurfaceFrameReady())
+                    "getVideoSurfaceSize" -> result.success(FFI.getVideoSurfaceSize())
                     else -> result.notImplemented()
                 }
             }
@@ -230,9 +228,10 @@ class MainActivity : FlutterActivity() {
     private fun requestRelativeMouseCapture() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val view = captureTargetView() ?: return
-        if (!view.hasPointerCapture()) {
-            view.requestPointerCapture()
-        }
+        // Always request: the system may report the capture as held while it
+        // has actually been dropped, and skipping the call then loses the mouse
+        // for good. Re-requesting is harmless when it is already granted.
+        view.requestPointerCapture()
         // The grant is asynchronous, report what the system actually did.
         view.post { reportPointerCaptureState() }
     }

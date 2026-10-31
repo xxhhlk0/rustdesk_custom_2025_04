@@ -31,4 +31,5 @@ object FFI {
     external fun isServiceClipboardEnabled(): Boolean
     external fun setVideoSurface(surface: Surface?)
     external fun isSurfaceFrameReady(): Boolean
+    external fun getVideoSurfaceSize(): String
 }

@@ -10,15 +10,24 @@ const H265_MIME_TYPE: &str = "video/hevc";
 static WINDOW: Mutex<Option<Arc<NativeWindow>>> = Mutex::new(None);
 static DECODER: Mutex<Option<(String, SurfaceDecoder)>> = Mutex::new(None);
 static FRAME_RENDERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SURFACE_SIZE: Mutex<(i32, i32)> = Mutex::new((0, 0));
 
 /// True once a decoded frame has been handed to the surface.
 pub fn frame_rendered() -> bool {
     FRAME_RENDERED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Real decoded frame size, reported to the client so it can lay the texture out
+/// instead of guessing from the peer display list.
+pub fn surface_size() -> (i32, i32) {
+    *SURFACE_SIZE.lock().unwrap()
+}
+
 struct SurfaceDecoder {
     codec: MediaCodec,
+    window: Arc<NativeWindow>,
     pts: u64,
+    size_reported: bool,
 }
 
 // The codec handle is only touched from the video decode thread behind the
@@ -26,7 +35,7 @@ struct SurfaceDecoder {
 unsafe impl Send for SurfaceDecoder {}
 
 impl SurfaceDecoder {
-    fn new(mime: &str, window: &NativeWindow, csd: &[Vec<u8>]) -> Option<Self> {
+    fn new(mime: &str, window: &Arc<NativeWindow>, csd: &[Vec<u8>]) -> Option<Self> {
         let w = if window.width() > 0 {
             window.width()
         } else {
@@ -68,7 +77,12 @@ impl SurfaceDecoder {
                             w,
                             h
                         );
-                        return Some(Self { codec, pts: 0 });
+                        return Some(Self {
+                            codec,
+                            window: window.clone(),
+                            pts: 0,
+                            size_reported: false,
+                        });
                     }
                     Err(e) => log::error!("surface start failed variant={}: {:?}", variant, e),
                 },
@@ -92,6 +106,16 @@ impl SurfaceDecoder {
             }
         }
         while let Some(out) = self.codec.dequeue_output_buffer(Duration::from_millis(1))? {
+            if !self.size_reported {
+                let format = self.codec.output_format();
+                if let (Some(w), Some(h)) = (format.i32("width"), format.i32("height")) {
+                    if w > 0 && h > 0 {
+                        *SURFACE_SIZE.lock().unwrap() = (w, h);
+                        self.size_reported = true;
+                        log::info!("surface frame size {}x{}", w, h);
+                    }
+                }
+            }
             self.codec.release_output_buffer(out, true)?;
             FRAME_RENDERED.store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -108,6 +132,7 @@ pub fn set_window_from_java(env: *mut jni::sys::JNIEnv, surface: jni::sys::jobje
     *WINDOW.lock().unwrap() = window.map(Arc::new);
     *DECODER.lock().unwrap() = None;
     FRAME_RENDERED.store(false, std::sync::atomic::Ordering::SeqCst);
+    *SURFACE_SIZE.lock().unwrap() = (0, 0);
     log::info!("video surface {}", if surface.is_null() { "cleared" } else { "set" });
 }
 

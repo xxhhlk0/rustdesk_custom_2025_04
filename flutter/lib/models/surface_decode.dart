@@ -15,6 +15,7 @@ class SurfaceDecode {
 
   int textureId = -1;
   final enabled = false.obs;
+  final size = ''.obs;
 
   bool get available => isAndroid && textureId >= 0;
 
@@ -61,12 +62,22 @@ class SurfaceDecode {
         return false;
       }
       enabled.value = true;
+      await _refreshSize();
       return true;
     } catch (e) {
       debugPrint('[Surface] setSurfaceDecode failed: $e');
       enabled.value = false;
       return false;
     }
+  }
+
+  Future<void> _refreshSize() async {
+    try {
+      final value = await _channel.invokeMethod('getVideoSurfaceSize');
+      if (value is String && value.contains('x')) {
+        size.value = value;
+      }
+    } catch (_) {}
   }
 
   Future<bool> _waitForFrame() async {

@@ -1185,24 +1185,35 @@ class SurfacePaint extends StatelessWidget {
     final c = Provider.of<CanvasModel>(context);
     final s = c.scale;
     final adjust = c.getAdjustY();
-    final displays = ffiModel.pi.getCurDisplays();
-    final w = displays.isNotEmpty && displays[0].width > 0
-        ? displays[0].width.toDouble()
-        : 2560.0;
-    final h = displays.isNotEmpty && displays[0].height > 0
-        ? displays[0].height.toDouble()
-        : 1440.0;
-    return Transform(
-      alignment: Alignment.topLeft,
-      transform: Matrix4.identity()
-        ..translate(c.x, c.y + adjust)
-        ..scale(s),
-      child: SizedBox(
-        width: w,
-        height: h,
-        child: Texture(textureId: SurfaceDecode.instance.textureId),
-      ),
-    );
+    return Obx(() {
+      var w = 0.0;
+      var h = 0.0;
+      final parts = SurfaceDecode.instance.size.value.split('x');
+      if (parts.length == 2) {
+        w = double.tryParse(parts[0]) ?? 0;
+        h = double.tryParse(parts[1]) ?? 0;
+      }
+      if (w <= 0 || h <= 0) {
+        final displays = ffiModel.pi.getCurDisplays();
+        w = displays.isNotEmpty && displays[0].width > 0
+            ? displays[0].width.toDouble()
+            : 2560.0;
+        h = displays.isNotEmpty && displays[0].height > 0
+            ? displays[0].height.toDouble()
+            : 1440.0;
+      }
+      return Transform(
+        alignment: Alignment.topLeft,
+        transform: Matrix4.identity()
+          ..translate(c.x, c.y + adjust)
+          ..scale(s),
+        child: SizedBox(
+          width: w,
+          height: h,
+          child: Texture(textureId: SurfaceDecode.instance.textureId),
+        ),
+      );
+    });
   }
 }
 

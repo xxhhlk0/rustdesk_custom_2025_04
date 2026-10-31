@@ -3075,4 +3075,16 @@ pub mod server_side {
     ) -> jboolean {
         jboolean::from(scrap::mediacodec_surface::frame_rendered())
     }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_getVideoSurfaceSize(
+        env: JNIEnv,
+        _class: JClass,
+    ) -> jstring {
+        let mut env = env;
+        let (w, h) = scrap::mediacodec_surface::surface_size();
+        env.new_string(format!("{}x{}", w, h))
+            .unwrap_or_default()
+            .into_raw()
+    }
 }
