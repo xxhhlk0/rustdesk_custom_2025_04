@@ -217,11 +217,6 @@ class MainActivity : FlutterActivity() {
         view.setOnCapturedPointerListener(listener)
         Log.i(logTag, "enableRelativeMouseCapture view=${view.javaClass.simpleName}")
         requestRelativeMouseCapture()
-        // The first request can race with window focus; retry until granted.
-        view.postDelayed(captureRetry, 300)
-        view.postDelayed(captureRetry, 1000)
-        view.postDelayed(captureRetry, 2000)
-        view.postDelayed(captureRetry, 3000)
         return true
     }
 

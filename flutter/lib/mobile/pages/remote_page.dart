@@ -28,6 +28,11 @@ import '../widgets/custom_scale_widget.dart';
 
 final initText = '1' * 1024;
 
+/// Zero-copy Surface rendering is still experimental: the Flutter texture path
+/// breaks canvas layout and gestures, so it stays off until the native
+/// SurfaceView renderer lands.
+const bool kEnableSurfaceDecode = false;
+
 // Workaround for Android (default input method, Microsoft SwiftKey keyboard) when using physical keyboard.
 // When connecting a physical keyboard, `KeyEvent.physicalKey.usbHidUsage` are wrong is using Microsoft SwiftKey keyboard.
 // https://github.com/flutter/flutter/issues/159384
@@ -124,7 +129,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       }
       _disableAndroidSoftKeyboard(
           isKeyboardVisible: keyboardVisibilityController.isVisible);
-      if (isAndroid && !_surfaceTried) {
+      if (isAndroid && !_surfaceTried && kEnableSurfaceDecode) {
         _surfaceTried = true;
         // Ask for a key frame so the surface decoder gets SPS/PPS right away
         // instead of waiting for the next natural IDR.
