@@ -3,6 +3,7 @@ package com.carriez.flutter_hbb
 import android.content.Context
 import android.graphics.SurfaceTexture
 import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.StandardMessageCodec
