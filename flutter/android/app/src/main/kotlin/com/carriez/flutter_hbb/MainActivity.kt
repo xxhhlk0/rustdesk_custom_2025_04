@@ -109,7 +109,10 @@ class MainActivity : FlutterActivity() {
         )
         initFlutterChannel(flutterMethodChannel!!)
         initHostChannel(flutterEngine)
-        initVideoTexture(flutterEngine)
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            "rustdesk/video",
+            VideoPlatformViewFactory(flutterEngine.dartExecutor.binaryMessenger)
+        )
         thread {
             try {
                 setCodecInfo()

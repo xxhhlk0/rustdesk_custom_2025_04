@@ -28,10 +28,8 @@ import '../widgets/custom_scale_widget.dart';
 
 final initText = '1' * 1024;
 
-/// Zero-copy Surface rendering is still experimental: the Flutter texture path
-/// breaks canvas layout and gestures, so it stays off until the native
-/// SurfaceView renderer lands.
-const bool kEnableSurfaceDecode = false;
+/// Zero-copy Surface rendering via a native TextureView platform view.
+const bool kEnableSurfaceDecode = true;
 
 // Workaround for Android (default input method, Microsoft SwiftKey keyboard) when using physical keyboard.
 // When connecting a physical keyboard, `KeyEvent.physicalKey.usbHidUsage` are wrong is using Microsoft SwiftKey keyboard.
@@ -134,12 +132,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         // Ask for a key frame so the surface decoder gets SPS/PPS right away
         // instead of waiting for the next natural IDR.
         sessionRefreshVideo(sessionId, gFFI.ffiModel.pi);
-        final displays = gFFI.ffiModel.pi.getCurDisplays();
-        final w = displays.isNotEmpty ? displays[0].width : 0;
-        final h = displays.isNotEmpty ? displays[0].height : 0;
-        SurfaceDecode.instance
-            .setEnabled(true, width: w, height: h)
-            .then((ok) {
+        SurfaceDecode.instance.startWatch().then((ok) {
           if (ok) {
             SurfaceDecode.instance.markFirstFrameShown();
             if (mounted) setState(() {});
@@ -187,7 +180,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     clearWaylandKeyboardPromptSuppressedForConnection(sessionId.toString());
     _waylandKeyboardGateWorker?.dispose();
     if (_surfaceTried) {
-      SurfaceDecode.instance.setEnabled(false);
+      SurfaceDecode.instance.reset();
     }
     inputModel.keyboardInputAllowed = true;
     await gFFI.close();
@@ -701,8 +694,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         color: MyTheme.canvasColor,
         child: Stack(children: () {
           final paints = [
+            SurfacePaint(ffiModel: gFFI.ffiModel),
             Obx(() => SurfaceDecode.instance.enabled.value
-                ? SurfacePaint(ffiModel: gFFI.ffiModel)
+                ? const SizedBox.shrink()
                 : ImagePaint(ffiModel: gFFI.ffiModel)),
             Positioned(
               top: 10,
@@ -1191,10 +1185,11 @@ class SurfacePaint extends StatelessWidget {
     final c = Provider.of<CanvasModel>(context);
     final s = c.scale;
     final adjust = c.getAdjustY();
+    final dpr = MediaQuery.of(context).devicePixelRatio;
     return Obx(() {
-      // Prefer the size of the last decoded frame: the canvas scale was
-      // computed against it, so laying the texture out with anything else
-      // makes the picture shrink.
+      // Keep the native surface at the video's pixel size: the widget is laid
+      // out in logical pixels, so divide by the device pixel ratio and put the
+      // ratio back into the transform. The result matches ImagePaint exactly.
       var w = m.image?.width.toDouble() ?? 0;
       var h = m.image?.height.toDouble() ?? 0;
       if (w <= 0 || h <= 0) {
@@ -1217,11 +1212,11 @@ class SurfacePaint extends StatelessWidget {
         alignment: Alignment.topLeft,
         transform: Matrix4.identity()
           ..translate(c.x, c.y + adjust)
-          ..scale(s),
+          ..scale(s * dpr),
         child: SizedBox(
-          width: w,
-          height: h,
-          child: Texture(textureId: SurfaceDecode.instance.textureId),
+          width: w / dpr,
+          height: h / dpr,
+          child: const AndroidView(viewType: 'rustdesk/video'),
         ),
       );
     });
