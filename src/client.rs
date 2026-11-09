@@ -4050,7 +4050,9 @@ pub fn start_video_thread<F, T>(
         #[cfg(windows)]
         sync_cpu_usage();
         get_hwcodec_config();
-        let mut video_handler = None;
+        // 显式标注类型: 下面 (从丢弃恢复解码时) 会先访问 video_handler 的字段,
+        // 那时 Option 的元素类型还没从后续的赋值推断出来, 不标注会报 E0282/E0609。
+        let mut video_handler: Option<VideoHandler> = None;
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
