@@ -1262,15 +1262,21 @@ fn get_encoder_config(
     }
     #[cfg(feature = "vram")]
     Encoder::update(scrap::codec::EncodingUpdate::Check);
-    // 默认关键帧间隔为编码帧率的 20 倍; 录制仍固定为 240 帧。
-    let profile_fps = crate::hw_encode_profile::active_profile()
-        .and_then(|profile| profile.fps)
-        .unwrap_or(30)
-        .max(1) as usize;
+    // 默认关键帧间隔按"秒"语义换算 (目标 20s); 录制仍固定为 240 帧。
+    // 编码器按帧数计 GOP, 而实际出帧率受采集节奏与客户端解码能力制约, 通常远低于
+    // profile 的配置值 (实测配 120fps、实际约 30fps)。若直接拿配置值 x20, 真实 IDR
+    // 间隔会被放大数倍 (2400 帧 @30fps 约 80s), 客户端一旦丢帧就要等这么久才能重新同步。
+    // 因此估算用的帧率封顶到保守值 (仍保留 profile 的 fps 作为编码器参数)。
+    const KEYFRAME_INTERVAL_SECS: usize = 20;
+    const ASSUMED_MAX_EFFECTIVE_FPS: i32 = 30;
     let keyframe_interval = if record {
         Some(240)
     } else {
-        Some(profile_fps.saturating_mul(20))
+        let effective_fps = crate::hw_encode_profile::active_profile()
+            .and_then(|profile| profile.fps)
+            .unwrap_or(30)
+            .clamp(1, ASSUMED_MAX_EFFECTIVE_FPS) as usize;
+        Some(effective_fps.saturating_mul(KEYFRAME_INTERVAL_SECS))
     };
     let negotiated_codec = Encoder::negotiated_codec();
     // 硬件编码 profile (预置档/自定义 + 按客户端覆盖)

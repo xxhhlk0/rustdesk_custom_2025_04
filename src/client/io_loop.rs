@@ -1393,6 +1393,36 @@ impl<T: InvokeUiSession> Remote<T> {
             custom_fps = 30;
         }
         let inactive_threshold = 15;
+        // 请求刷新(关键帧)。必须放在下面 `let Some(min_decode_fps) = ... else { return }` 之前:
+        // 画面长时间无解码输出时 inactive_counter 会顶到阈值, 使 min_decode_fps 变成 None 而提前
+        // return, 把唯一的求救通道一起跳过 —— 那恰恰是最需要关键帧的时刻。队列积压与画面冻结
+        // 都应请求刷新; refresh_times 不再设上限(旧代码 20 次用完后长会话彻底失去自愈能力),
+        // 只保留 10 秒节流。
+        const REFRESH_FROZEN_SECS: usize = 3;
+        for (display, thread) in self.video_threads.iter_mut() {
+            let ctl = &mut thread.fps_control;
+            let (queue_len, queue_cap) = {
+                let q = thread.video_queue.read().unwrap();
+                (q.len(), q.capacity())
+            };
+            let frozen = ctl.inactive_counter >= REFRESH_FROZEN_SECS;
+            let backed_up = queue_len > std::cmp::max(1, queue_cap / 2);
+            let throttled = ctl
+                .last_refresh_instant
+                .map(|t| t.elapsed().as_secs() > 10)
+                .unwrap_or(true);
+            if (frozen || backed_up) && throttled {
+                self.handler.refresh_video(*display as _);
+                log::info!(
+                    "Refresh display {} (frozen={}, queue={}) to reduce delay",
+                    display,
+                    frozen,
+                    queue_len
+                );
+                ctl.refresh_times += 1;
+                ctl.last_refresh_instant = Some(Instant::now());
+            }
+        }
         let max_queue_len = self
             .video_threads
             .iter()
@@ -1466,23 +1496,6 @@ impl<T: InvokeUiSession> Remote<T> {
                 self.sender.send(Data::Message(msg)).ok();
                 log::info!("Set fps to {}", auto_fps);
                 self.handler.lc.write().unwrap().last_auto_fps = Some(auto_fps);
-            }
-        }
-        // send refresh
-        for (display, thread) in self.video_threads.iter_mut() {
-            let ctl = &mut thread.fps_control;
-            let video_queue = thread.video_queue.read().unwrap();
-            let tolerable = std::cmp::min(min_decode_fps, video_queue.capacity() / 2);
-            if ctl.refresh_times < 20 // enough
-                    && (video_queue.len() > tolerable
-                            && (ctl.refresh_times == 0 || ctl.last_refresh_instant.map(|t|t.elapsed().as_secs() > 10).unwrap_or(false)))
-            {
-                // Refresh causes client set_display, left frames cause flickering.
-                drop(video_queue);
-                self.handler.refresh_video(*display as _);
-                log::info!("Refresh display {} to reduce delay", display);
-                ctl.refresh_times += 1;
-                ctl.last_refresh_instant = Some(Instant::now());
             }
         }
     }
