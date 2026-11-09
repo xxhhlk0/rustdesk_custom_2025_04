@@ -86,6 +86,15 @@ const CAPTURE_SILENT_REBUILD_INTERVAL: Duration = Duration::from_secs(60);
 static LAST_CAPTURE_SILENT_REBUILD: std::sync::Mutex<Option<Instant>> =
     std::sync::Mutex::new(None);
 
+// 客户端请求刷新 (Misc::RefreshVideo / RefreshVideoDisplay) 后, 最多等这么久
+// 还没等到关键帧, 就判定"编码器没能真正产出 IDR"。
+// 只靠 force_keyframe 不够: 硬件编码器不一定认那条强制 IDR 的路径 (例如 FFmpeg
+// 的 nvenc 走 AV_FRAME_FLAG_KEY, 走没走到要看具体版本与帧类型), 于是客户端
+// 一直等一个永远不来的关键帧 —— 客户端收到不来的关键帧就把后续帧全部静默
+// 丢弃 (只丢不报、不计数), 表现就是"画面不动, 只能手动重连"。
+// 兜底: 重建编码器。新编码器的第一帧必然是 IDR, 客户端立刻恢复。
+const FORCE_IDR_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[cfg(windows)]
 struct DxgiRecoveryState {
     attempts: usize,
@@ -778,6 +787,11 @@ fn run(vs: VideoService) -> ResultType<()> {
     let capture_width = c.width;
     let capture_height = c.height;
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
+    // 关键帧跟踪:
+    // - pending_idr: 客户端请求刷新后, 等待编码器真正产出关键帧的时刻。
+    // - stat_key_frames: 本秒产出的关键帧数 (诊断: 客户端画面卡住时先看这个)。
+    let mut pending_idr: Option<Instant> = None;
+    let mut stat_key_frames: usize = 0;
     // 诊断统计 (每秒一行): 定位 fps 瓶颈在采集超时 / 每帧耗时 / 等待控制端取帧
     let mut stat_instant = Instant::now();
     let mut stat_loops = 0u32;
@@ -850,6 +864,14 @@ fn run(vs: VideoService) -> ResultType<()> {
             // 触发 reduce delay 时尤其严重 (每 1.4 秒崩一次)。
             if encoder.force_keyframe().is_ok() {
                 log::info!("force keyframe (OPTION_REFRESH, no display change)");
+                // 记下这次请求: 下面要验证编码器是否真的产出了关键帧。
+                // force_keyframe() 只是"请求", 硬件编码器未必真的照做;
+                // 客户端在拿到关键帧前会一直丢弃后续帧, 拿不到就是永久冻结。
+                // 只记第一次: 客户端可能连发刷新请求 (队列积压时每帧都发),
+                // 每次都重置计时会让下面的兜底永远等不到超时。
+                if pending_idr.is_none() {
+                    pending_idr = Some(Instant::now());
+                }
             } else {
                 // 编码器不支持强制 IDR → 退回旧行为
                 log::info!("switch to refresh (force_keyframe unsupported)");
@@ -970,6 +992,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
                     stat_convert_us += stat_convert_begin.elapsed().as_micros() as u64;
                     let stat_handle_begin = Instant::now();
+                    let mut is_key_frame = false;
                     let send_conn_ids = handle_one_frame(
                         display_idx,
                         &sp,
@@ -981,8 +1004,27 @@ fn run(vs: VideoService) -> ResultType<()> {
                         &mut first_frame,
                         capture_width,
                         capture_height,
+                        &mut is_key_frame,
                     )?;
                     stat_handle_us += stat_handle_begin.elapsed().as_micros() as u64;
+                    if is_key_frame {
+                        stat_key_frames += 1;
+                        if pending_idr.take().is_some() {
+                            log::info!("key frame delivered after refresh request");
+                        }
+                    } else if let Some(requested_at) = pending_idr {
+                        // 请求了 IDR 却一直没等到: 硬件编码器没有真的产出关键帧。
+                        // 客户端此刻正把每一帧静默丢弃等这个关键帧, 等不到就是永久冻结。
+                        // 兜底: 重建编码器 (新编码器第一帧必为 IDR)。
+                        if requested_at.elapsed() >= FORCE_IDR_WAIT_TIMEOUT {
+                            log::warn!(
+                                "no key frame within {:?} after refresh request, rebuild encoder",
+                                FORCE_IDR_WAIT_TIMEOUT
+                            );
+                            pending_idr = None;
+                            bail!("SWITCH");
+                        }
+                    }
                     frame_controller.set_send(now, send_conn_ids);
                     send_counter += 1;
                 }
@@ -1036,6 +1078,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     // yun.len() > 0 means the frame is not texture.
                     if repeat_encode_counter < repeat_encode_max {
                         repeat_encode_counter += 1;
+                        let mut is_key_frame = false;
                         let send_conn_ids = handle_one_frame(
                             display_idx,
                             &sp,
@@ -1047,7 +1090,12 @@ fn run(vs: VideoService) -> ResultType<()> {
                             &mut first_frame,
                             capture_width,
                             capture_height,
+                            &mut is_key_frame,
                         )?;
+                        if is_key_frame {
+                            stat_key_frames += 1;
+                            pending_idr = None;
+                        }
                         frame_controller.set_send(now, send_conn_ids);
                         send_counter += 1;
                     }
@@ -1144,10 +1192,11 @@ fn run(vs: VideoService) -> ResultType<()> {
             let stat_enc_us = STAT_ENC_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             let stat_send_us = STAT_SEND_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             log::info!(
-                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms, avg_snap={:.2}ms, avg_enc={:.1}ms, avg_send={:.1}ms",
+                "video enc stats: spf_target={:.1}ms, loops/s={:.0}, sent={}, key/s={}, capture_timeout/s={}, avg_loop_cost={:.1}ms, avg_fetch_wait={:.1}ms, frames={}, avg_cap={:.1}ms, avg_convert={:.1}ms, avg_encode_send={:.1}ms, avg_snap={:.2}ms, avg_enc={:.1}ms, avg_send={:.1}ms",
                 spf.as_secs_f32() * 1000.0,
                 stat_loops as f64 * 1000.0 / stat_ms,
                 send_counter,
+                stat_key_frames,
                 stat_would_block,
                 stat_cost_us as f64 / 1000.0 / stat_loops.max(1) as f64,
                 stat_fetch_us as f64 / 1000.0 / stat_loops.max(1) as f64,
@@ -1171,6 +1220,7 @@ fn run(vs: VideoService) -> ResultType<()> {
             stat_instant = Instant::now();
             stat_loops = 0;
             stat_would_block = 0;
+            stat_key_frames = 0;
             stat_cost_us = 0;
             stat_fetch_us = 0;
             stat_succ = 0;
@@ -1440,6 +1490,22 @@ fn check_privacy_mode_changed(
     Ok(())
 }
 
+/// 视频帧里是否含关键帧 (key=1)。
+///
+/// 客户端靠这个标记决定"能不能从这一帧开始解码": 收到关键帧才复位丢弃标志,
+/// 之前收到的帧全部静默丢弃。所以服务端必须如实标记 —— 标错或不标, 客户端就会
+/// 一直等一个永远不来的关键帧, 画面表现为"不动, 但也不报错"。
+#[inline]
+fn vf_is_key_frame(vf: &VideoFrame) -> bool {
+    use video_frame::Union::*;
+    match &vf.union {
+        Some(Vp8s(f)) | Some(Vp9s(f)) | Some(Av1s(f)) | Some(H264s(f)) | Some(H265s(f)) => {
+            f.frames.iter().any(|e| e.key)
+        }
+        _ => false,
+    }
+}
+
 #[inline]
 fn handle_one_frame(
     display: usize,
@@ -1452,6 +1518,7 @@ fn handle_one_frame(
     first_frame: &mut bool,
     width: usize,
     height: usize,
+    is_key_frame: &mut bool,
 ) -> ResultType<HashSet<i32>> {
     let stat_snap_begin = Instant::now();
     sp.snapshot(|sps| {
@@ -1482,6 +1549,7 @@ fn handle_one_frame(
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *encode_fail_counter = 0;
             vf.display = display as _;
+            *is_key_frame = vf_is_key_frame(&vf);
             let mut msg = Message::new();
             msg.set_video_frame(vf);
             recorder

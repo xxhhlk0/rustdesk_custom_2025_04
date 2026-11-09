@@ -25,6 +25,11 @@ const WEBRTC_SUSPECT_GRACE: Duration = Duration::from_secs(3);
 // KCP gets no such hint, only how long since a packet arrived; its endpoint pings an idle peer
 // about every 2s, so this is several missed pings, and matches the 8s WebRTC arrives at.
 const KCP_PEER_SILENCE_LIMIT: Duration = Duration::from_secs(8);
+// 连续多少秒没有解码输出即判定为"画面冻结"。
+// 冻结时不能再把丢弃队列置位 (见下方出站消息分支): 置位等于自己把后续帧全部
+// 静默丢弃, 而丢弃标志要等对端的关键帧才复位 —— 对端此时恰恰也可能给不出关键帧,
+// 于是自己请求刷新、自己把画面锁死, 形成死循环。
+const FROZEN_DISCARD_THRESHOLD: usize = 3;
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::{clipboard::try_empty_clipboard_files, clipboard_file::unix_file_clip};
 use base::{
@@ -789,12 +794,21 @@ impl<T: InvokeUiSession> Remote<T> {
                     Some(message::Union::Misc(misc)) => match misc.union {
                         Some(misc::Union::RefreshVideo(_)) => {
                             self.video_threads.iter().for_each(|(_, v)| {
-                                *v.discard_queue.write().unwrap() = true;
+                                // 冻结中的客户端必须继续解码, 不能把队列全丢掉干等关键帧:
+                                // 丢掉之后若关键帧迟迟不来, 每一帧都会被静默丢弃
+                                // (无解码错误、无日志), 画面永久冻结, 只能手动重连。
+                                if v.fps_control.inactive_counter < FROZEN_DISCARD_THRESHOLD {
+                                    *v.discard_queue.write().unwrap() =
+                                        Some(Instant::now() + crate::client::DISCARD_QUEUE_TTL);
+                                }
                             });
                         }
                         Some(misc::Union::RefreshVideoDisplay(display)) => {
                             if let Some(v) = self.video_threads.get_mut(&(display as usize)) {
-                                *v.discard_queue.write().unwrap() = true;
+                                if v.fps_control.inactive_counter < FROZEN_DISCARD_THRESHOLD {
+                                    *v.discard_queue.write().unwrap() =
+                                        Some(Instant::now() + crate::client::DISCARD_QUEUE_TTL);
+                                }
                             }
                         }
                         _ => {}
@@ -1398,7 +1412,7 @@ impl<T: InvokeUiSession> Remote<T> {
         // return, 把唯一的求救通道一起跳过 —— 那恰恰是最需要关键帧的时刻。队列积压与画面冻结
         // 都应请求刷新; refresh_times 不再设上限(旧代码 20 次用完后长会话彻底失去自愈能力),
         // 只保留 10 秒节流。
-        const REFRESH_FROZEN_SECS: usize = 3;
+        const REFRESH_FROZEN_SECS: usize = FROZEN_DISCARD_THRESHOLD;
         for (display, thread) in self.video_threads.iter_mut() {
             let ctl = &mut thread.fps_control;
             let (queue_len, queue_cap) = {
@@ -1411,6 +1425,16 @@ impl<T: InvokeUiSession> Remote<T> {
                 .last_refresh_instant
                 .map(|t| t.elapsed().as_secs() > 10)
                 .unwrap_or(true);
+            // 自愈看门狗: discard_queue 卡在 true 时, 解码线程会把收到的每一帧都
+            // 静默丢弃 (client.rs 的 VideoQueue 分支直接 continue): 不解码、不报错、
+            // 不计数, 画面永久冻结, 只能手动重连。
+            // 该标志由本端发出 Misc::RefreshVideo / RefreshVideoDisplay 时置位
+            // (出站消息分支), 正常靠对端随后发来的 key=1 帧复位; 对端这一轮没给出
+            // 关键帧时就没有复位机会。这里在判定冻结后主动清掉, 让解码链路恢复:
+            // 多解一帧依赖可能不完整的 P 帧, 好过把整条链路锁死。
+            if frozen {
+                *thread.discard_queue.write().unwrap() = None;
+            }
             if (frozen || backed_up) && throttled {
                 self.handler.refresh_video(*display as _);
                 log::info!(
@@ -2670,7 +2694,7 @@ impl<T: InvokeUiSession> Remote<T> {
         let (video_sender, video_receiver) = std::sync::mpsc::channel::<MediaData>();
         let decode_fps = Arc::new(RwLock::new(None));
         let frame_count = Arc::new(RwLock::new(0));
-        let discard_queue = Arc::new(RwLock::new(false));
+        let discard_queue = Arc::new(RwLock::new(None));
         let video_thread = VideoThread {
             video_queue: video_queue.clone(),
             video_sender,
@@ -2926,14 +2950,17 @@ struct VideoThread {
     video_sender: MediaSender,
     decode_fps: Arc<RwLock<Option<usize>>>,
     frame_count: Arc<RwLock<usize>>,
-    discard_queue: Arc<RwLock<bool>>,
+    /// None = 不丢弃; Some(deadline) = 丢弃到该时刻为止。
+    /// 见 crate::client::DISCARD_QUEUE_TTL 的说明。
+    discard_queue: Arc<RwLock<Option<Instant>>>,
     fps_control: FpsControl,
 }
 
 impl Drop for VideoThread {
     fn drop(&mut self) {
         // since channels are buffered, messages sent before the disconnect will still be properly received.
-        *self.discard_queue.write().unwrap() = true;
+        *self.discard_queue.write().unwrap() =
+            Some(Instant::now() + crate::client::DISCARD_QUEUE_TTL);
     }
 }
 

@@ -110,6 +110,21 @@ pub const SEC30: Duration = Duration::from_secs(30);
 const RESTART_REMOTE_DEVICE_GRACE: Duration = Duration::from_secs(5 * 60);
 pub const VIDEO_QUEUE_SIZE: usize = 6;
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
+/// 丢弃队列标志的存活时限。
+///
+/// 丢弃标志 (discard_queue) 置位后, 解码线程会把收到的每一帧静默丢弃 (不解码、
+/// 不报错、不计数), 只等下一个关键帧来复位。若对端一直没送来关键帧, 画面就会
+/// 永久冻结, 只能手动重连。
+///
+/// 正常路径下复位是及时的: 本端发出 Misc::RefreshVideo / RefreshVideoDisplay
+/// 后, 对端会强制 IDR, 关键帧一到标志即被清除。但"对端没送来关键帧"这种异常
+/// (编码器没真正产出 IDR / 关键帧没被标记 / 链路中断) 必须有兜底, 否则一次
+/// 异常就足以让画面永久静止。
+///
+/// 因此该标志改为保存"丢弃截止时刻"而不是布尔量: 超过时限自动恢复解码。
+/// 解码器此时可能拿到缺少参考帧的 P 帧 (会报一次解码错误并触发一次刷新请求),
+/// 但好过把整条链路锁死 —— 后续的刷新请求会再次拿到关键帧。
+pub const DISCARD_QUEUE_TTL: Duration = Duration::from_secs(10);
 
 pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
 pub const LOGIN_MSG_PASSWORD_WRONG: &str = "Wrong Password";
@@ -4021,7 +4036,7 @@ pub fn start_video_thread<F, T>(
     video_queue: Arc<RwLock<ArrayQueue<VideoFrame>>>,
     fps: Arc<RwLock<Option<usize>>>,
     chroma: Arc<RwLock<Option<Chroma>>>,
-    discard_queue: Arc<RwLock<bool>>,
+    discard_queue: Arc<RwLock<Option<Instant>>>,
     video_callback: F,
 ) where
     F: 'static + FnMut(usize, &mut scrap::ImageRgb, *mut c_void, bool) + Send,
@@ -4039,18 +4054,29 @@ pub fn start_video_thread<F, T>(
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
+        // 上一帧是否处于"静默丢弃"状态: 用于检测"从丢弃恢复解码"的那一刻。
+        let mut was_discarding = false;
         loop {
             if let Ok(data) = video_receiver.recv() {
                 match data {
                     MediaData::VideoFrame(_) | MediaData::VideoQueue => {
                         let vf = match data {
                             MediaData::VideoFrame(vf) => {
-                                *discard_queue.write().unwrap() = false;
+                                // 关键帧到了: 丢弃标志立即复位, 解码从关键帧重新开始。
+                                *discard_queue.write().unwrap() = None;
                                 *vf
                             }
                             MediaData::VideoQueue => {
                                 if let Some(vf) = video_queue.read().unwrap().pop() {
-                                    if discard_queue.read().unwrap().clone() {
+                                    // 丢弃标志带时限: 超过 DISCARD_QUEUE_TTL 就恢复解码,
+                                    // 不能因为对端一直没送来关键帧而把画面永久锁死。
+                                    let discarding = discard_queue
+                                        .read()
+                                        .unwrap()
+                                        .map(|deadline| Instant::now() < deadline)
+                                        .unwrap_or(false);
+                                    if discarding {
+                                        was_discarding = true;
                                         continue;
                                     }
                                     vf
@@ -4063,6 +4089,15 @@ pub fn start_video_thread<F, T>(
                                 continue;
                             }
                         };
+                        if was_discarding {
+                            // 从"静默丢弃"恢复到解码: 这一帧很可能是缺少参考帧的 P 帧,
+                            // 解码会失败。清一次失败计数, 给对端送来关键帧留出余量,
+                            // 免得连续几次失败就把该格式误判为"不支持"而降级编码。
+                            was_discarding = false;
+                            if let Some(handler) = video_handler.as_mut() {
+                                handler.fail_counter = 0;
+                            }
+                        }
                         let display = vf.display as usize;
                         let start = std::time::Instant::now();
                         let format = CodecFormat::from(&vf);
