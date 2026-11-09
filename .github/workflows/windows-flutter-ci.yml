@@ -574,7 +574,7 @@ jobs:
             aarch64-linux-android)
               mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
               cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/
-              cp ./target/${{ matrix.job.target }}/release/liblustrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
               pushd flutter
               flutter build apk "--${{ matrix.job.reltype }}" --target-platform android-arm64 --split-per-abi
               mv build/app/outputs/flutter-apk/app-arm64-v8a-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
@@ -582,7 +582,7 @@ jobs:
             armv7-linux-androideabi)
               mkdir -p ./flutter/android/app/src/main/jniLibs/armeabi-v7a
               cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/
-              cp ./target/${{ matrix.job.target }}/release/liblustrustdesk.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
               pushd flutter
               flutter build apk "--${{ matrix.job.reltype }}" --target-platform android-arm --split-per-abi
               mv build/app/outputs/flutter-apk/app-armeabi-v7a-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
@@ -590,7 +590,7 @@ jobs:
             x86_64-linux-android)
               mkdir -p ./flutter/android/app/src/main/jniLibs/x86_64
               cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/x86_64/
-              cp ./target/${{ matrix.job.target }}/release/liblustrustdesk.so ./flutter/android/app/src/main/jniLibs/x86_64/librustdesk.so
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/x86_64/librustdesk.so
               pushd flutter
               flutter build apk "--${{ matrix.job.reltype }}" --target-platform android-x64 --split-per-abi
               mv build/app/outputs/flutter-apk/app-x86_64-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
@@ -633,6 +633,8 @@ jobs:
           if ! keytool -list -keystore /tmp/signingKey.jks -storetype PKCS12 \
                  -storepass "$SIGNING_STORE_PASSWORD" -alias "$SIGNING_ALIAS" >/dev/null 2>&1; then
             echo "::error::keystore 校验失败: ANDROID_KEY_STORE_PASSWORD 或 ANDROID_ALIAS 与 keystore 不匹配"
+            echo "  本地自查: python .rd-ci/verify-android-keystore.py --keystore <ks> --b64 <ks>.b64"
+            echo "  常见原因: 网页填 secret 时带入尾随空格/换行; 生成 keystore 时密码用了双引号导致 \$ ! 被 shell 吞掉"
             exit 1
           fi
           echo "签名配置校验通过 (alias=$SIGNING_ALIAS)"
@@ -665,6 +667,30 @@ jobs:
             x86_64) ANDROID_ARCH="x86_64" ;;
           esac
           aws s3 cp "$APK_FILE" s3://${{ secrets.R2_BUCKET_NAME }}/${{ env.VERSION }}/${DATE}/android/${ANDROID_ARCH}/ \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
+            --region auto
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+      - name: Upload librustdesk.so to R2 (intermediate)
+        shell: bash
+        run: |
+          case ${{ matrix.job.target }} in
+            aarch64-linux-android)
+              LIB_NAME="librustdesk.so.aarch64-linux-android"
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
+            ;;
+            armv7-linux-androideabi)
+              LIB_NAME="librustdesk.so.armv7-linux-androideabi"
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
+            ;;
+            x86_64-linux-android)
+              LIB_NAME="librustdesk.so.x86_64-linux-android"
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so /tmp/${LIB_NAME}
+            ;;
+          esac
+          aws s3 cp /tmp/${LIB_NAME} s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/android-libs/${LIB_NAME} \
             --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
             --region auto
         env:
