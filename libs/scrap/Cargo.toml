@@ -94,8 +94,12 @@ zbus = { version = "3.15", optional = true }
 #   删掉 Process() 里两个从未被读取的 GetDesc; 新增 vp detail / vram enc detail
 #   耗时拆分日志 (convert 与 encode 分开, 否则 Rust 侧 avg_enc 看不出谁慢)
 # branch: fix/qsv-refresh-idr (FFmpeg QSV refresh requests I + KEY for IDR)
+# + fix(nvenc): set forced-idr=1 (27e8697): nvenc 默认把 pict_type=I 强制关键帧
+#   编成 FORCEINTRA (普通 I 帧, 包不带 KEY 标志), 上层 pending_idr 看门狗等不到
+#   key=1 → 每 ~2.5s 重建一次编码器形成风暴 → >60fps 会话周期性卡顿。
+#   forced-idr=1 让强制关键帧走 FORCEIDR (真 IDR)。
 git = "https://github.com/xxhhlk0/hwcodec"
-rev = "a15f711586fa1b99319b687964156146df3e0619"
+rev = "27e8697836286166240fd6c963dee7233b2539ac"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
