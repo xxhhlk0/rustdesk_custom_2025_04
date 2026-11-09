@@ -2,6 +2,15 @@ name: Windows Flutter CI (x64 only)
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: "构建哪些平台 (all=桌面+手机, mobile=只手机, windows=只桌面)"
+        type: choice
+        default: all
+        options:
+          - all
+          - mobile
+          - windows
 
 env:
   SCITER_RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503, also 1.78 has ABI change which causes our sciter version not working, https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
@@ -35,6 +44,7 @@ jobs:
     secrets: inherit
 
   build-RustDeskTempTopMostWindow:
+    if: inputs.platform != 'mobile'
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
     secrets: inherit
     with:
@@ -45,6 +55,7 @@ jobs:
 
   build-for-windows-flutter:
     name: x86_64-pc-windows-msvc
+    if: inputs.platform != 'mobile'
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
     steps:
@@ -333,6 +344,7 @@ jobs:
   # 内容与 .github/workflows/flutter-build.yml 的 build-rustdesk-android 一致,
   # 单独复制一份是为了不在那个"全平台"工作流里加条件 (会牵动十几个 job 的 needs)。
   build-rustdesk-android:
+    if: inputs.platform != 'windows'
     needs: [generate-bridge]
     name: build rustdesk android apk ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
@@ -705,6 +717,7 @@ jobs:
   # AltStore-Sideloadly 使用。内容与 .github/workflows/flutter-build.yml 的
   # build-rustdesk-ios 一致。
   build-rustdesk-ios:
+    if: inputs.platform != 'windows'
     name: build rustdesk ios ipa
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
