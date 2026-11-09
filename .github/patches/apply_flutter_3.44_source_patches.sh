@@ -6,15 +6,23 @@
 # google_fonts. Every other platform is still on Flutter 3.24.5, where the old names/versions
 # are required, so these changes are kept OUT of the committed sources and applied here instead.
 #
-# Used by BOTH the Windows arm64 build (flutter-build.yml) and its dedicated bridge artifact
-# (bridge.yml) so they share an identical 3.44 source state -- the generated *.freezed.dart must
-# compile against the same Flutter/freezed version the arm64 build resolves.
+# Used by the Windows arm64 build (flutter-build.yml), the iOS build (flutter-build.yml /
+# windows-flutter-ci.yml, both on macos-latest) and the dedicated bridge artifact (bridge.yml),
+# so they share an identical 3.44 source state -- the generated *.freezed.dart must compile
+# against the same Flutter/freezed version the build resolves.
 #
 # Remove this script (and commit the changes) once upstream bumps Flutter across the board.
 #
-# Run from the repository root. sed is used (not a git-apply patch) because the checked-out
-# sources are CRLF on the windows-11-arm runner; the substitutions below are anchor-free and
-# therefore CRLF-safe.
+# Run from the repository root.
+#
+# The substitutions are done by an embedded Python script, not by sed:
+#   - GNU sed uses `sed -i 'expr' file`, BSD sed (macOS) needs `sed -i '' 'expr' file`;
+#     on macOS the GNU form makes sed treat the expression as the backup suffix and die with
+#     `sed: 1: "flutter/lib/common.dart": invalid command code f`.
+#   - the multi-line replacement below relies on a backslash-newline inside the sed
+#     replacement, which BSD sed does not interpret the same way.
+#   Python 3 is present on every runner we use (ubuntu / macos / windows) and behaves the
+#   same everywhere. It also keeps the checked-out CRLF sources intact (windows-11-arm).
 set -euo pipefail
 
 readonly NO_MATCHES=0
@@ -120,16 +128,85 @@ if ! is_unpatched_state; then
   exit 1
 fi
 
-# ThemeData API renames (Flutter 3.27+):
-sed -i 's/dialogTheme: DialogTheme(/dialogTheme: DialogThemeData(/g' flutter/lib/common.dart
-sed -i 's/tabBarTheme: const TabBarTheme(/tabBarTheme: const TabBarThemeData(/g' flutter/lib/common.dart
-sed -i '/static ThemeData lightTheme = ThemeData(/,/static ThemeData darkTheme = ThemeData(/s/dialogTheme: DialogThemeData(/dialogTheme: DialogThemeData(\
-      backgroundColor: Colors.white,/' flutter/lib/common.dart
-sed -i '/static ThemeData darkTheme = ThemeData(/,/scrollbarTheme: scrollbarThemeDark,/s/dialogTheme: DialogThemeData(/dialogTheme: DialogThemeData(\
-      backgroundColor: Color(0xFF18191E),/' flutter/lib/common.dart
-# Dependency bumps required by the newer Dart/Flutter:
-sed -i 's/extended_text: 14.0.0/extended_text: 15.0.2/' flutter/pubspec.yaml
-sed -i 's/google_fonts: \^6.2.1/google_fonts: ^8.1.0/' flutter/pubspec.yaml
+# ThemeData API renames (Flutter 3.27+) + dependency bumps + the dialog background colors.
+python3 - <<'PY'
+import sys
+
+COMMON = 'flutter/lib/common.dart'
+PUBSPEC = 'flutter/pubspec.yaml'
+
+NEEDLE = 'dialogTheme: DialogThemeData('
+WHITE = '      backgroundColor: Colors.white,'
+DARK = '      backgroundColor: Color(0xFF18191E),'
+
+
+def read(path):
+    with open(path, 'rb') as f:
+        return f.read().decode('utf-8')
+
+
+def write(path, text):
+    with open(path, 'wb') as f:
+        f.write(text.encode('utf-8'))
+
+
+def eol_of(text):
+    return '\r\n' if '\r\n' in text else '\n'
+
+
+def insert_after_needle(lines, start_marker, end_marker, needle, insert_text, eol):
+    """Inside [start_marker, end_marker] (both inclusive), append insert_text on a new
+    line right after the first occurrence of needle on a line. Mirrors the previous
+    `sed '/start/,/end/s/needle/needle\\\n      <insert>/'` behaviour."""
+    out = []
+    in_range = False
+    for line in lines:
+        body = line.rstrip('\r\n')
+        term = line[len(body):]
+        if in_range and needle in body:
+            pos = body.index(needle)
+            body = body[:pos] + needle + eol + insert_text + body[pos + len(needle):]
+            out.append(body + term)
+            continue
+        out.append(line)
+        if not in_range:
+            if start_marker in body:
+                in_range = True
+        elif end_marker in body:
+            in_range = False
+    return out
+
+
+common = read(COMMON)
+eol = eol_of(common)
+
+# 1) ThemeData API renames (Flutter 3.27+)
+common = common.replace('dialogTheme: DialogTheme(', 'dialogTheme: DialogThemeData(')
+common = common.replace('tabBarTheme: const TabBarTheme(', 'tabBarTheme: const TabBarThemeData(')
+
+# 2) dialog background colors, per theme block
+lines = common.splitlines(keepends=True)
+lines = insert_after_needle(
+    lines,
+    'static ThemeData lightTheme = ThemeData(',
+    'static ThemeData darkTheme = ThemeData(',
+    NEEDLE, WHITE, eol)
+lines = insert_after_needle(
+    lines,
+    'static ThemeData darkTheme = ThemeData(',
+    'scrollbarTheme: scrollbarThemeDark,',
+    NEEDLE, DARK, eol)
+common = ''.join(lines)
+write(COMMON, common)
+
+# 3) Dependency bumps required by the newer Dart/Flutter
+pubspec = read(PUBSPEC)
+pubspec = pubspec.replace('extended_text: 14.0.0', 'extended_text: 15.0.2')
+pubspec = pubspec.replace('google_fonts: ^6.2.1', 'google_fonts: ^8.1.0')
+write(PUBSPEC, pubspec)
+
+print('Flutter 3.44 source patches applied.')
+PY
 
 # Fail loudly if any expected substitution did not produce the complete state.
 if ! is_complete_patch_state; then
