@@ -107,12 +107,35 @@ impl SurfaceDecoder {
         }
         while let Some(out) = self.codec.dequeue_output_buffer(Duration::from_millis(1))? {
             if !self.size_reported {
+                // surface 模式下 output_format 的 width/height 常常是 configure 时的
+                // 窗口尺寸 (TextureView 初始布局), 不是码流真实尺寸; 真实尺寸在
+                // crop 字段里。拿窗口尺寸去布局会把 2560x1440 的画面拉成手机屏
+                // 比例 (截图实测内容区比例 0.695, 正确应为 1.78, 横向严重压扁)。
+                // 因此 crop 优先。
                 let format = self.codec.output_format();
-                if let (Some(w), Some(h)) = (format.i32("width"), format.i32("height")) {
+                let crop_w = match (format.i32("crop-right"), format.i32("crop-left")) {
+                    (Some(r), Some(l)) if r >= l => Some(r - l + 1),
+                    _ => None,
+                };
+                let crop_h = match (format.i32("crop-bottom"), format.i32("crop-top")) {
+                    (Some(b), Some(t)) if b >= t => Some(b - t + 1),
+                    _ => None,
+                };
+                let fmt_w = format.i32("width").filter(|v| *v > 0);
+                let fmt_h = format.i32("height").filter(|v| *v > 0);
+                if let (Some(w), Some(h)) = (crop_w.or(fmt_w), crop_h.or(fmt_h)) {
                     if w > 0 && h > 0 {
                         *SURFACE_SIZE.lock().unwrap() = (w, h);
                         self.size_reported = true;
-                        log::info!("surface frame size {}x{}", w, h);
+                        log::info!(
+                            "surface frame size {}x{} (crop w={:?} h={:?}, fmt {}x{})",
+                            w,
+                            h,
+                            crop_w,
+                            crop_h,
+                            fmt_w.unwrap_or(0),
+                            fmt_h.unwrap_or(0)
+                        );
                     }
                 }
             }
