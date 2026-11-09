@@ -71,6 +71,21 @@ const DXGI_RECOVERY_WINDOW: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const DXGI_RECOVERY_FRAME_GRACE: Duration = Duration::from_secs(2);
 
+// 采集静默看门狗 (Windows): DXGI duplication 与当前桌面失配后 (锁屏 / 安全桌面 /
+// 桌面切换瞬间新建) 会长期一帧都不产出, 客户端只会停在最后一帧上 (用户看到的就是
+// "画面卡死"). 上游的 WouldBlock->GDI 兜底在成功取过一帧后不再生效 (try_gdi 被清零),
+// 本 fork 的 OPTION_REFRESH 又只发 IDR, 因此静默后无法自愈. 这里在长时间无帧时重建
+// 采集器: 新建的 duplication 会立刻给出当前桌面 (含锁屏), 让画面跟上真实状态。
+#[cfg(windows)]
+const CAPTURE_SILENT_GRACE: Duration = Duration::from_secs(6);
+// 进程内重建限频: 静止桌面本来就无新帧, 不限频会反复重建。
+#[cfg(windows)]
+const CAPTURE_SILENT_REBUILD_INTERVAL: Duration = Duration::from_secs(60);
+// 跨 video service 重启保留 (重建 = bail!("SWITCH") = 新实例, 用静态量才能限频)。
+#[cfg(windows)]
+static LAST_CAPTURE_SILENT_REBUILD: std::sync::Mutex<Option<Instant>> =
+    std::sync::Mutex::new(None);
+
 #[cfg(windows)]
 struct DxgiRecoveryState {
     attempts: usize,
@@ -777,6 +792,9 @@ fn run(vs: VideoService) -> ResultType<()> {
     // 16.7ms 目标下每轮多睡 1~2ms 就会把 60fps 拖成 ~54fps。
     let mut frame_deadline = Instant::now();
     let mut profile_check_instant = Instant::now();
+    #[cfg(windows)]
+    // 上次成功取到帧的时刻: 判定采集是否已经静默 (见循环开头的看门狗)。
+    let mut last_frame_at = Instant::now();
 
     while sp.ok() {
         if profile_check_instant.elapsed() >= Duration::from_millis(500) {
@@ -784,6 +802,26 @@ fn run(vs: VideoService) -> ResultType<()> {
             let current_profile = crate::hw_encode_profile::refresh_active_profile();
             if current_profile != active_hw_profile {
                 log::info!("hardware encode profile changed, recreating encoder");
+                bail!("SWITCH");
+            }
+        }
+        #[cfg(windows)]
+        if last_frame_at.elapsed() >= CAPTURE_SILENT_GRACE {
+            let allowed = {
+                let mut last = LAST_CAPTURE_SILENT_REBUILD.lock().unwrap();
+                match *last {
+                    Some(t) if t.elapsed() < CAPTURE_SILENT_REBUILD_INTERVAL => false,
+                    _ => {
+                        *last = Some(Instant::now());
+                        true
+                    }
+                }
+            };
+            if allowed {
+                log::warn!(
+                    "capture silent for {}s, rebuild capturer",
+                    last_frame_at.elapsed().as_secs()
+                );
                 bail!("SWITCH");
             }
         }
@@ -876,6 +914,10 @@ fn run(vs: VideoService) -> ResultType<()> {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 stat_succ += 1;
                 repeat_encode_counter = 0;
+                #[cfg(windows)]
+                {
+                    last_frame_at = Instant::now();
+                }
                 if frame.valid() {
                     let screenshot_key = (vs.source, display_idx);
                     let screenshot = SCREENSHOTS.lock().unwrap().remove(&screenshot_key);
