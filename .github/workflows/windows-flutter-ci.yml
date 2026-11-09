@@ -740,7 +740,7 @@ jobs:
           - {
               arch: aarch64,
               target: aarch64-apple-ios,
-              os: macos-latest,
+              os: macos-15,
               vcpkg-triplet: arm64-ios,
             }
     steps:
@@ -754,6 +754,15 @@ jobs:
       - name: Install dependencies
         run: |
           brew install nasm yasm
+      - name: Select Xcode 16.0
+        # macos-15 默认是 Xcode 16.4。Flutter 3.24.5 的最低 iOS deployment target
+        # 是 12.0, 而 Xcode 16 支持的最低正好是 12.0 (Xcode 26 就要求 >= 15.x 了),
+        # 所以这条线能沿用 Flutter 3.24.5 的原配置; 显式切 16.0 是因为它与
+        # Flutter 3.24.5 同代, 兼容性最好。
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          xcodebuild -version
+          xcode-select -p
 
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -771,15 +780,15 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: "stable"
-          flutter-version: ${{ env.FLUTTER_IOS_VERSION }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      - name: Patch RustDesk sources for Flutter 3.44
-        # iOS 走 Flutter 3.44 (Xcode 26 要求 deployment target >= iOS 15),
-        # 与 Windows arm64 那条线共用同一份 3.44 源/依赖改动与配套 bridge,
-        # 保证生成的 *.freezed.dart 与构建时解析到的 Flutter/freezed 版本一致。
-        # `flutter build` 随后会自己跑 pub get, 重算 pubspec.lock。
+      - name: Patch flutter
         shell: bash
-        run: bash .github/patches/apply_flutter_3.44_source_patches.sh
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          if [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]]; then
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
 
       - name: Setup vcpkg with retry
         uses: nick-fields/retry@v3
@@ -844,7 +853,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p ./src ./flutter/lib ./flutter/macos/Runner ./flutter/ios/Runner
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact-flutter-3.44/ ./src/ \
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/builds/${{ github.run_id }}/bridge/bridge-artifact/ ./src/ \
             --endpoint-url ${{ secrets.R2_ENDPOINT_URL }} \
             --region auto
           mv ./src/generated_bridge.dart ./flutter/lib/
