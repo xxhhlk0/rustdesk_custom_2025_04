@@ -2239,6 +2239,11 @@ class CanvasModel with ChangeNotifier {
   bool _locked = false;
   double _devicePixelRatio = 1.0;
   Size _size = Size.zero;
+  /// 底部工具栏 (Scaffold.bottomNavigationBar) 实际占用的高度, 由 remote_page 量出来
+  /// 回报。getSize() 的基准是**整个窗口**高度, 而 body 已经被工具条压缩过, 少算这一截
+  /// 会让"跟随光标"算出的最下方边界落在工具条底下: 鼠标模式下单指移动指针时画面自动
+  /// 跟随, 画面最下面永远看不到。双指手动平移不受这个下限约束, 所以那种方式正常。
+  double _bottomBarInset = 0;
   // the tabbar over the image
   // double tabBarHeight = 0.0;
   // the window border's width
@@ -2342,6 +2347,7 @@ class CanvasModel with ChangeNotifier {
       // bottom overlay (e.g. key-help tools) so the canvas is not covered.
       h = h -
           mediaData.viewInsets.bottom -
+          _bottomBarInset -
           (parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.bottom ??
               0);
       // Orientation-specific handling:
@@ -2374,6 +2380,17 @@ class CanvasModel with ChangeNotifier {
   }
 
   updateSize() => _size = getSize();
+
+  /// 更新底部工具栏占用的高度 (remote_page 每帧结束后量一次)。
+  /// 变化时重算尺寸与视图样式, 让"跟随光标"的下边界立刻按新的可见高度生效。
+  void setBottomBarInset(double v) {
+    if ((v - _bottomBarInset).abs() < 0.5) {
+      return;
+    }
+    _bottomBarInset = v;
+    updateSize();
+    updateViewStyle();
+  }
 
   updateViewStyle({refreshMousePos = true, notify = true}) async {
     final style = await bind.sessionGetViewStyle(sessionId: sessionId);

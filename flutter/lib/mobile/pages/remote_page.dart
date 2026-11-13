@@ -69,6 +69,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   String _value = '';
   Orientation? _currentOrientation;
   final _uniqueKey = UniqueKey();
+  /// 量底部工具栏的高度: 画布尺寸要扣掉它, 否则"跟随光标"能看到的最下方会落在
+  /// 工具条底下 (鼠标模式单指移动指针时, 画面最下面看不到)。
+  final GlobalKey _bottomBarKey = GlobalKey();
   Timer? _iosKeyboardWorkaroundTimer;
 
   final _blockableOverlayState = BlockableOverlayState();
@@ -204,6 +207,13 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       trySyncClipboard();
       _requestKeyFrameOnResume();
     }
+  }
+
+  @override
+  void didChangeMetrics() {
+    // 旋转 / 软键盘夹出夹入 / 分屏都会改 body 高度, 底部工具栏的高度也跟着变,
+    // 重新量一次再回报给画布。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncBottomBarInset());
   }
 
   // 后台期间视频帧仍在到达, 但界面不消费, 队列很快积压。回前台时积压的旧帧
@@ -471,8 +481,20 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           ? getBottomAppBar()
           : Offstage());
 
+  /// 把底部工具栏的实际高度同步给画布。
+  /// Scaffold 的 bottomNavigationBar 会把 body 压缩到工具条之上, 但画布尺寸是用整个
+  /// 窗口算的: 少扣这一截时, "跟随光标"能移动到的下边界会落在工具条底下, 表现就是
+  /// 鼠标模式单指移动指针时画面最下面永远看不到 (工具条隐藏时高度为 0, 不受影响)。
+  void _syncBottomBarInset() {
+    final ro = _bottomBarKey.currentContext?.findRenderObject();
+    final h = ro is RenderBox && ro.hasSize ? ro.size.height : 0.0;
+    gFFI.canvasModel.setBottomBarInset(h);
+  }
+
   @override
   Widget build(BuildContext context) {
+    // 底部工具栏的高度只有布局之后才知道, 每帧结束后量一次回报给画布。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncBottomBarInset());
     final keyboardIsVisible =
         keyboardVisibilityController.isVisible && _showEdit;
     final showActionButton = !_showBar || keyboardIsVisible || _showGestureHelp;
@@ -513,6 +535,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                     });
                   }),
           bottomNavigationBar: Obx(() => Stack(
+                key: _bottomBarKey,
                 alignment: Alignment.bottomCenter,
                 children: [
                   gFFI.ffiModel.pi.isSet.isTrue &&
