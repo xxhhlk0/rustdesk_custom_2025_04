@@ -694,7 +694,17 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         color: MyTheme.canvasColor,
         child: Stack(children: () {
           final paints = [
-            SurfacePaint(ffiModel: gFFI.ffiModel),
+            // The video surface is an Android-only zero-copy path: its
+            // `rustdesk/video` platform view factory is registered in
+            // MainActivity. Building an AndroidView on iOS is not merely
+            // useless, it aborts the app: AndroidViewController.dispose()
+            // sends `{'id': ..., 'hybrid': ...}` through the platform_views
+            // channel, while the Darwin engine handler expects a bare int and
+            // calls `[call.arguments longLongValue]` on it. A dictionary does
+            // not respond to that selector, so every session teardown raised
+            // `-[__NSDictionaryM longLongValue]` -> NSInvalidArgumentException
+            // -> SIGABRT. Keep the surface Android-only.
+            if (isAndroid) SurfacePaint(ffiModel: gFFI.ffiModel),
             Obx(() => SurfaceDecode.instance.enabled.value
                 ? const SizedBox.shrink()
                 : ImagePaint(ffiModel: gFFI.ffiModel)),
