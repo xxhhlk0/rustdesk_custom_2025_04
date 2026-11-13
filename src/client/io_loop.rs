@@ -1477,12 +1477,15 @@ impl<T: InvokeUiSession> Remote<T> {
             let thread = self.video_threads.get_mut(&display)?;
             let ctl = &mut thread.fps_control;
             let len = thread.video_queue.read().unwrap().len();
-            let decode_fps = thread.decode_fps.read().unwrap().clone()?;
             let last_auto_fps = last_auto_fps.clone().unwrap_or(custom_fps as _);
             if ctl.inactive_counter > inactive_threshold {
                 return None;
             }
-            if len > 1 && last_auto_fps > limited_fps || len > std::cmp::max(1, decode_fps / 2) {
+            // 旧条件 `len > decode_fps / 2` 拿队列长度(上限 VIDEO_QUEUE_SIZE)跟帧率比,
+            // 量纲不同: 6 格的队列永远到不了 ~66, "队列一满就降 fps" 从来没触发过,
+            // 于是自动 fps 一路顶到上限, 队列反复溢出。改成按队列容量判断。
+            if len > 1 && last_auto_fps > limited_fps || len > crate::client::VIDEO_QUEUE_SIZE / 2
+            {
                 ctl.idle_counter = 0;
                 return Some(false);
             }
@@ -1503,8 +1506,18 @@ impl<T: InvokeUiSession> Remote<T> {
         if last_auto_fps.is_none() || should_decrease || should_increase {
             // limited_fps to ensure decoding is faster than encoding
             let mut auto_fps = limited_fps;
-            if should_decrease && limited_fps < max_queue_len {
-                auto_fps = limited_fps / 2;
+            if should_decrease && max_queue_len > crate::client::VIDEO_QUEUE_SIZE / 2 {
+                // 队列已过容量一半, 说明当前 fps 下游吃不下: 砍到上限的 3/4 让队列排空。
+                // (原条件是 `limited_fps < max_queue_len`, 拿 fps 和队列长度比, 永远不
+                // 成立, 降档其实没生效过。)
+                auto_fps = (limited_fps * 3 / 4).max(1);
+            } else if should_increase && last_auto_fps.is_some() {
+                // 上调限步: 一步跳到上限会立刻把队列灌满, 下一拍又被砍半, 实测在
+                // 33~120 之间反复横跳, 每跳一次都伴随溢出和刷新。每次最多加 10。
+                auto_fps = std::cmp::min(
+                    limited_fps,
+                    last_auto_fps.unwrap_or(custom_fps as _) + 10,
+                );
             }
             if auto_fps < 1 {
                 auto_fps = 1;
@@ -1589,8 +1602,24 @@ impl<T: InvokeUiSession> Remote<T> {
                     } else {
                         let video_queue = thread.video_queue.read().unwrap();
                         if video_queue.force_push(vf).is_some() {
+                            // 队列满了, 说明本端跟不上。被挤出去的那一帧会让后面排队的
+                            // P 帧全部失去参考帧: 逐帧解码会逐帧失败, 而每帧失败又会各自
+                            // 请求一次关键帧 —— 实测一次溢出能在 3 秒里连发 ~20 个 IDR,
+                            // 期间画面几乎全是 I 帧, 表现就是卡顿/冻结, 而且越救越糟。
+                            // 改成整队丢弃 + 丢弃到关键帧 + 刷新限频: 一次溢出只换一个 IDR。
+                            while video_queue.pop().is_some() {}
                             drop(video_queue);
-                            self.handler.refresh_video(display as _);
+                            *thread.discard_queue.write().unwrap() =
+                                Some(Instant::now() + crate::client::DISCARD_QUEUE_TTL);
+                            let throttled = thread
+                                .fps_control
+                                .last_refresh_instant
+                                .map(|t| t.elapsed() > Duration::from_millis(500))
+                                .unwrap_or(true);
+                            if throttled {
+                                thread.fps_control.last_refresh_instant = Some(Instant::now());
+                                self.handler.refresh_video(display as _);
+                            }
                         } else {
                             thread.video_sender.send(MediaData::VideoQueue).ok();
                         }

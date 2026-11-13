@@ -4066,6 +4066,15 @@ pub fn start_video_thread<F, T>(
                             MediaData::VideoFrame(vf) => {
                                 // 关键帧到了: 丢弃标志立即复位, 解码从关键帧重新开始。
                                 *discard_queue.write().unwrap() = None;
+                                // 关键帧是绕过队列直接送进来的, 队列里还压着它之前的旧帧
+                                // (推队列时只发了一个 VideoQueue 信号, 解码线程一次只 pop
+                                // 一帧, 排不干净)。IDR 之后按旧参考链去解这些帧必然报
+                                // "Could not find ref with POC N", 而每失败一次又会再请求
+                                // 一次关键帧。直接从队列里丢掉, 让解码从关键帧重新开始。
+                                {
+                                    let q = video_queue.read().unwrap();
+                                    while q.pop().is_some() {}
+                                }
                                 *vf
                             }
                             MediaData::VideoQueue => {
@@ -4155,6 +4164,12 @@ pub fn start_video_thread<F, T>(
                                     //
                                     // to-do: fix the error
                                     log::error!("handle video frame error, {}", e);
+                                    // 参考链已经断了: 后面排队的 P 帧都缺参考帧, 逐帧解
+                                    // 只会逐帧报错, 而且每帧失败又会各自请求一次关键帧
+                                    // (实测能连发十几个 IDR)。置丢弃标志跳过它们, 由随后
+                                    // 到达的关键帧复位 (带 10s 兜底时限)。
+                                    *discard_queue.write().unwrap() =
+                                        Some(Instant::now() + crate::client::DISCARD_QUEUE_TTL);
                                     session.refresh_video(display as _);
                                 }
                                 _ => {}
