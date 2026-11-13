@@ -1185,6 +1185,9 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
   }
 }
 
+/// 上一次打印过的 SurfacePaint 尺寸组合, 避免每帧重建都刷日志。
+String _lastLoggedSize = '';
+
 class SurfacePaint extends StatelessWidget {
   final FfiModel ffiModel;
   const SurfacePaint({Key? key, required this.ffiModel}) : super(key: key);
@@ -1197,11 +1200,25 @@ class SurfacePaint extends StatelessWidget {
     final adjust = c.getAdjustY();
     final dpr = MediaQuery.of(context).devicePixelRatio;
     return Obx(() {
-      // Keep the native surface at the video's pixel size: the widget is laid
-      // out in logical pixels, so divide by the device pixel ratio and put the
-      // ratio back into the transform. The result matches ImagePaint exactly.
-      var w = m.image?.width.toDouble() ?? 0;
-      var h = m.image?.height.toDouble() ?? 0;
+      // 尺寸来源优先级: 对端显示器尺寸 > 最后一帧图像 > surface 上报值 > 兜底。
+      //
+      // 关键是别用 surface 上报值当第一顺位: surface 是在 configure 时按 TextureView
+      // 当时的窗口尺寸建解码器的, output_format 里读到的宽高经常就是那个窗口尺寸,
+      // 而窗口尺寸本身又来自本 widget —— 一旦读到手机屏比例, 就会锁死成错的,
+      // 表现是"刚进去那一瞬间对的(软件渲染), 切到零拷贝后比例突变"。
+      // 对端显示器尺寸来自 PeerInfo, 首帧之前就已知且不会变, 宽高比与码流一致
+      // (码流可能被缩放, 但比例不变), 所以用它做基准最稳。
+      var w = 0.0;
+      var h = 0.0;
+      final displays = ffiModel.pi.getCurDisplays();
+      if (displays.isNotEmpty && displays[0].width > 0 && displays[0].height > 0) {
+        w = displays[0].width.toDouble();
+        h = displays[0].height.toDouble();
+      }
+      if (w <= 0 || h <= 0) {
+        w = m.image?.width.toDouble() ?? 0;
+        h = m.image?.height.toDouble() ?? 0;
+      }
       if (w <= 0 || h <= 0) {
         final parts = SurfaceDecode.instance.size.value.split('x');
         if (parts.length == 2) {
@@ -1210,13 +1227,14 @@ class SurfacePaint extends StatelessWidget {
         }
       }
       if (w <= 0 || h <= 0) {
-        final displays = ffiModel.pi.getCurDisplays();
-        w = displays.isNotEmpty && displays[0].width > 0
-            ? displays[0].width.toDouble()
-            : 2560.0;
-        h = displays.isNotEmpty && displays[0].height > 0
-            ? displays[0].height.toDouble()
-            : 1440.0;
+        w = 2560.0;
+        h = 1440.0;
+      }
+      final tag = '${w}x$h|img=${m.image?.width ?? 0}x${m.image?.height ?? 0}'
+          '|rep=${SurfaceDecode.instance.size.value}';
+      if (tag != _lastLoggedSize) {
+        _lastLoggedSize = tag;
+        debugPrint('[Surface] layout $tag (displays=${displays.length > 0 ? "${displays[0].width}x${displays[0].height}" : "-"})');
       }
       return Transform(
         alignment: Alignment.topLeft,

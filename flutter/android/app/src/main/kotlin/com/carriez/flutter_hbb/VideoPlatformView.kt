@@ -35,6 +35,11 @@ class VideoPlatformView(context: Context) : PlatformView {
                 width: Int,
                 height: Int
             ) {
+                // 解码器是在 configure 时按当时窗口的宽高建的, 窗口之后再变, 解码器
+                // 只是把画面拉伸到新尺寸, 比例就永久错了 —— 实测表现是"刚进会话
+                // 那一瞬间是对的 (软件渲染), 切到零拷贝后比例突变"。
+                // 视图尺寸一变就重建解码器, 让它按新尺寸重新 configure。
+                attach(surfaceTexture)
             }
 
             override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {

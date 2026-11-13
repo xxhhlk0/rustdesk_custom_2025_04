@@ -455,6 +455,24 @@ pub fn pinned_bitrate() -> Option<u32> {
 #[cfg(feature = "hwcodec")]
 pub fn hw_params(record: bool) -> Option<scrap::codec::HwEncoderParams> {
     let p = active_profile()?;
+    // 常见配置陷阱: rc=CQ 是恒定 QP, 码率由 q 决定, kbs 设了也不会被编码器读取;
+    // 反过来 q 只在 rc=CQ 下有意义, 别的模式下写了也白写。两者同时出现基本是
+    // 把"CQ 的 q"和"VBR 的 kbs"混着填了, 直接点出来, 省得又去日志里猜码率为什么不对。
+    if p.rc == Some(RC_CQ) {
+        if p.kbs.is_some() {
+            log::warn!(
+                "hw-encode-profile: rc=CQ(恒定 QP) 下 kbs={:?} 不生效, 码率由 q={:?} 决定; 需要限码率请改用 rc=VBR",
+                p.kbs,
+                p.q
+            );
+        }
+    } else if p.q.is_some() && p.rc.is_some() {
+        log::warn!(
+            "hw-encode-profile: q={:?} 只在 rc=CQ 时生效, 当前 rc={:?} 会忽略 q",
+            p.q,
+            p.rc
+        );
+    }
     let gop = if record { None } else { p.gop };
     let v = &p.vendor;
     let mut vendor = Vec::<(String, i32)>::new();
